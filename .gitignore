@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+
+# 虚拟环境与工具缓存
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 本地环境与编辑器
+.env
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志和数据库
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 运行时数据；只提交目录占位文件
+data/uploads/*
+!data/uploads/.gitkeep
+data/chroma/*
+!data/chroma/.gitkeep
+data/metadata/*
+!data/metadata/.gitkeep
+data/chat_history/*
+!data/chat_history/.gitkeep
