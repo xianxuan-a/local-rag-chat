@@ -1,14 +1,17 @@
 """Safe local upload orchestration."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.exceptions import (
-    FeatureNotImplementedException,
+    AppException,
+    ConflictException,
     FileProcessException,
     PayloadTooLargeException,
     ResourceNotFoundException,
@@ -17,9 +20,14 @@ from app.core.exceptions import (
 )
 from app.core.logger import get_logger
 from app.models.file_record import FileRecord, FileStatus
+from app.models.knowledge_base import KnowledgeBase, RebuildStatus
 from app.repositories.file_repository import FileRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.hash_service import HashService
+from app.services.document_loader import DocumentLoaderService
+from app.services.document_splitter import DocumentSplitterService
+from app.services.runtime_coordinator import RuntimeCoordinator
+from app.services.vector_store_service import VectorWriteReceipt
 from app.utils.file_utils import (
     ensure_directory,
     sanitize_filename,
@@ -36,13 +44,36 @@ class FileService:
 
     COPY_CHUNK_SIZE = 1024 * 1024
 
-    def __init__(self, db: Session, settings: Settings) -> None:
+    def __init__(
+        self,
+        db: Session,
+        settings: Settings,
+        runtime: RuntimeCoordinator | None = None,
+    ) -> None:
         self.db = db
         self.settings = settings
+        self.runtime = runtime or RuntimeCoordinator(settings)
         self.file_repository = FileRepository(db)
         self.knowledge_base_repository = KnowledgeBaseRepository(db)
+        self.loader = DocumentLoaderService()
+        self.splitter = DocumentSplitterService(settings=settings)
 
     def upload_file(
+        self,
+        knowledge_base_id: str,
+        upload_file: UploadFile,
+    ) -> FileRecord:
+        with self.runtime.admin_operation("upload_file"):
+            knowledge_base = self.knowledge_base_repository.get_by_id(
+                knowledge_base_id
+            )
+            if knowledge_base is None:
+                raise ResourceNotFoundException("知识库不存在")
+            if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+                raise ConflictException("知识库正在重建，暂时不能上传文件")
+            return self._upload_file_locked(knowledge_base_id, upload_file)
+
+    def _upload_file_locked(
         self,
         knowledge_base_id: str,
         upload_file: UploadFile,
@@ -170,13 +201,545 @@ class FileService:
             logger.exception("无法清理上传失败后残留的文件：%s", file_path)
 
     def list_files(self, knowledge_base_id: str) -> list[FileRecord]:
-        _ = knowledge_base_id
-        raise FeatureNotImplementedException("文件列表功能尚未完成初始化")
+        """Return files belonging only to an existing knowledge base."""
+        if self.knowledge_base_repository.get_by_id(knowledge_base_id) is None:
+            raise ResourceNotFoundException("知识库不存在")
+        return self.file_repository.list_by_knowledge_base(knowledge_base_id)
 
     def get_file(self, file_id: str) -> FileRecord:
-        _ = file_id
-        raise FeatureNotImplementedException("文件查询功能尚未完成初始化")
+        """Return one real file record or a uniform not-found error."""
+        file_record = self.file_repository.get_by_id(file_id)
+        if file_record is None:
+            raise ResourceNotFoundException("文件不存在")
+        return file_record
+
+    def get_file_status(self, file_id: str) -> FileRecord:
+        """Return the record that owns the file's current persisted status."""
+        return self.get_file(file_id)
+
+    def update_file_status(
+        self,
+        file_id: str,
+        status: FileStatus,
+        *,
+        chunk_count: int | None = None,
+        error_message: str | None = None,
+    ) -> FileRecord:
+        """Update processing metadata and commit it as one transaction."""
+        if chunk_count is not None and chunk_count < 0:
+            raise ValidationException("文件分块数量不能小于 0")
+        try:
+            file_record = self.file_repository.update_status(
+                file_id,
+                status,
+                chunk_count=chunk_count,
+                error_message=error_message,
+            )
+            if file_record is None:
+                raise ResourceNotFoundException("文件不存在")
+            self.db.commit()
+            return file_record
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def process_file(self, file_id: str) -> FileRecord:
+        """Synchronously parse, split, embed, and replace one file's vectors."""
+
+        claimed = False
+        try:
+            with self.runtime.admin_operation("process_file_claim"):
+                file_record = self.get_file(file_id)
+                knowledge_base = self._get_knowledge_base(
+                    file_record.knowledge_base_id
+                )
+                self._preflight_file_processing(file_record, knowledge_base)
+                claimed_record = self.file_repository.claim_for_processing(file_id)
+                if claimed_record is None:
+                    self.db.rollback()
+                    self._raise_claim_conflict(file_id)
+                self.db.commit()
+                claimed = True
+
+            file_record = self.get_file(file_id)
+            file_path = self._resolve_managed_file_path(file_record)
+            if not file_path.exists():
+                raise ResourceNotFoundException("待处理文件不存在")
+            if not file_path.is_file() or file_path.is_symlink():
+                raise FileProcessException("待处理路径不是受管普通文件")
+
+            source_documents = self.loader.load_file(
+                file_path,
+                file_id=file_record.id,
+                knowledge_base_id=file_record.knowledge_base_id,
+                file_name=file_record.original_name,
+                file_type=file_record.file_type,
+            )
+            chunks = self.splitter.split_documents(source_documents)
+            config = self.runtime.vector_store.current_config
+            embeddings = self.runtime.vector_store.embed_documents(chunks, config)
+
+            self.db.expire_all()
+            knowledge_base = self._get_knowledge_base(
+                file_record.knowledge_base_id
+            )
+            if knowledge_base.active_collection_name is None:
+                with self.runtime.admin_operation("initialize_collection"):
+                    self.db.expire_all()
+                    file_record = self.get_file(file_id)
+                    knowledge_base = self._get_knowledge_base(
+                        file_record.knowledge_base_id
+                    )
+                    if knowledge_base.active_collection_name is None:
+                        self._activate_first_file(
+                            knowledge_base,
+                            file_record,
+                            chunks,
+                            embeddings,
+                        )
+                        return self.get_file(file_id)
+
+            with self.runtime.vector_write_lock:
+                self.db.expire_all()
+                file_record = self.get_file(file_id)
+                knowledge_base = self._get_knowledge_base(
+                    file_record.knowledge_base_id
+                )
+                self._validate_processing_write_state(
+                    file_record,
+                    knowledge_base,
+                    config.config_hash,
+                )
+                collection_name = knowledge_base.active_collection_name
+                if collection_name is None:
+                    raise ConflictException("知识库活动 Collection 尚未建立")
+                receipt = self.runtime.vector_store.replace_file_documents(
+                    collection_name=collection_name,
+                    knowledge_base_id=knowledge_base.id,
+                    file_id=file_record.id,
+                    documents=chunks,
+                    embeddings=embeddings,
+                    config=config,
+                    role="active",
+                )
+                try:
+                    self.file_repository.update_active_index(
+                        file_record,
+                        chunk_count=len(chunks),
+                        config_hash=config.config_hash,
+                        indexed_at=datetime.now(timezone.utc),
+                    )
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    self.runtime.vector_store.rollback_write(receipt)
+                    raise
+            return self.get_file(file_id)
+        except Exception as exc:
+            if claimed:
+                self._mark_processing_failed(file_id, exc)
+            raise
+
+    def _preflight_file_processing(
+        self,
+        file_record: FileRecord,
+        knowledge_base: KnowledgeBase,
+    ) -> None:
+        if file_record.status is FileStatus.PROCESSING:
+            raise ConflictException("文件正在处理中")
+
+        vector_store = self.runtime.vector_store
+        current_hash = vector_store.current_config_hash
+        if knowledge_base.active_collection_name:
+            if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+                raise ConflictException("知识库正在重建")
+            if knowledge_base.active_collection_name in {
+                knowledge_base.previous_collection_name,
+                knowledge_base.building_collection_name,
+                knowledge_base.cleanup_collection_name,
+            }:
+                raise ConflictException("活动 Collection 与其他数据库指针冲突")
+            if knowledge_base.active_embedding_config_hash != current_hash:
+                raise ConflictException(
+                    "当前 Embedding 配置与活动 Collection 不兼容，必须整库重建"
+                )
+            vector_store.get_collection(
+                knowledge_base.active_collection_name,
+                knowledge_base_id=knowledge_base.id,
+                expected_config_hash=current_hash,
+                role="active",
+                for_write=True,
+            )
+            return
+        if knowledge_base.building_collection_name:
+            self._resolve_initial_building(knowledge_base)
+            return
+        if knowledge_base.rebuild_status is not RebuildStatus.IDLE:
+            raise ConflictException("知识库重建状态与 Collection 指针不一致")
+
+    def _resolve_initial_building(self, knowledge_base: KnowledgeBase) -> None:
+        name = knowledge_base.building_collection_name
+        if not name:
+            return
+        vector_store = self.runtime.vector_store
+        if name in {
+            knowledge_base.active_collection_name,
+            knowledge_base.previous_collection_name,
+            knowledge_base.cleanup_collection_name,
+        }:
+            raise ConflictException("Building Collection 与其他数据库指针冲突")
+        if not vector_store.collection_exists(name):
+            if not self.knowledge_base_repository.clear_building_if_matches(
+                knowledge_base.id, name
+            ):
+                raise ConflictException("Building 指针已发生变化")
+            self.db.commit()
+            self.db.refresh(knowledge_base)
+            return
+        collection = vector_store.get_collection(
+            name,
+            knowledge_base_id=knowledge_base.id,
+            expected_config_hash=knowledge_base.building_embedding_config_hash,
+            role="building",
+            for_write=False,
+        )
+        lifecycle = collection.metadata.get("lifecycle_status")
+        if lifecycle == "BUILDING":
+            raise ConflictException(
+                "知识库存在未完成的 Building Collection，请先执行 abort-building"
+            )
+        if lifecycle != "FAILED":
+            raise ConflictException("Building Collection lifecycle 冲突")
+        vector_store.delete_collection(name)
+        if not self.knowledge_base_repository.clear_building_if_matches(
+            knowledge_base.id, name
+        ):
+            raise ConflictException("Building 指针已发生变化")
+        self.db.commit()
+        self.db.refresh(knowledge_base)
+
+    def _activate_first_file(
+        self,
+        knowledge_base: KnowledgeBase,
+        file_record: FileRecord,
+        chunks: list,
+        embeddings: list[list[float]],
+    ) -> str:
+        config = self.runtime.vector_store.current_config
+        self._resolve_initial_building(knowledge_base)
+        collection_name, generation = (
+            self.runtime.vector_store.generate_collection_name(
+                knowledge_base.id,
+                config.config_hash,
+            )
+        )
+        run_id = str(uuid4())
+        knowledge_base.building_collection_name = collection_name
+        knowledge_base.building_embedding_config_hash = config.config_hash
+        knowledge_base.rebuild_status = RebuildStatus.BUILDING
+        knowledge_base.rebuild_run_id = run_id
+        knowledge_base.building_started_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+        receipt = None
+        try:
+            self.runtime.vector_store.create_collection(
+                name=collection_name,
+                knowledge_base_id=knowledge_base.id,
+                config=config,
+                generation=generation,
+                lifecycle_status="BUILDING",
+            )
+            receipt = self.runtime.vector_store.replace_file_documents(
+                collection_name=collection_name,
+                knowledge_base_id=knowledge_base.id,
+                file_id=file_record.id,
+                documents=chunks,
+                embeddings=embeddings,
+                config=config,
+                role="building",
+            )
+            self.db.expire_all()
+            current_kb = self._get_knowledge_base(knowledge_base.id)
+            current_file = self.get_file(file_record.id)
+            if (
+                current_kb.rebuild_run_id != run_id
+                or current_kb.building_collection_name != collection_name
+            ):
+                raise ConflictException("首次 Collection 初始化状态已变化")
+            current_kb.active_collection_name = collection_name
+            current_kb.active_embedding_config_hash = config.config_hash
+            current_kb.building_collection_name = None
+            current_kb.building_embedding_config_hash = None
+            current_kb.rebuild_status = RebuildStatus.IDLE
+            current_kb.rebuild_run_id = None
+            current_kb.building_started_at = None
+            self.file_repository.update_active_index(
+                current_file,
+                chunk_count=len(chunks),
+                config_hash=config.config_hash,
+                indexed_at=datetime.now(timezone.utc),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            if receipt is not None:
+                self.runtime.vector_store.rollback_write(receipt)
+            self._mark_building_failed(
+                file_id=file_record.id,
+                collection_name=collection_name,
+            )
+            raise
+        try:
+            self.runtime.vector_store.set_lifecycle(collection_name, "ACTIVE")
+        except Exception:
+            logger.critical(
+                "首次 Collection 已切换但 lifecycle 更新失败（kb_id=%s, collection=%s）",
+                knowledge_base.id,
+                collection_name,
+                exc_info=True,
+            )
+        return collection_name
+
+    def _validate_processing_write_state(
+        self,
+        file_record: FileRecord,
+        knowledge_base: KnowledgeBase,
+        config_hash: str,
+    ) -> None:
+        if file_record.status is not FileStatus.PROCESSING:
+            raise ConflictException("文件处理状态已变化")
+        if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+            raise ConflictException("知识库正在重建")
+        if knowledge_base.active_embedding_config_hash != config_hash:
+            raise ConflictException("活动 Collection 配置已变化")
+        if knowledge_base.active_collection_name in {
+            knowledge_base.previous_collection_name,
+            knowledge_base.building_collection_name,
+            knowledge_base.cleanup_collection_name,
+        }:
+            raise ConflictException("活动 Collection 与其他数据库指针冲突")
+
+    def _get_knowledge_base(self, knowledge_base_id: str) -> KnowledgeBase:
+        knowledge_base = self.knowledge_base_repository.get_by_id(
+            knowledge_base_id
+        )
+        if knowledge_base is None:
+            raise ResourceNotFoundException("知识库不存在")
+        return knowledge_base
+
+    def _raise_claim_conflict(self, file_id: str) -> None:
+        file_record = self.file_repository.get_by_id(file_id)
+        if file_record is None:
+            raise ResourceNotFoundException("文件不存在")
+        knowledge_base = self._get_knowledge_base(file_record.knowledge_base_id)
+        if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+            raise ConflictException("知识库正在重建")
+        raise ConflictException("文件状态不允许处理")
+
+    def _mark_processing_failed(self, file_id: str, exc: Exception) -> None:
+        try:
+            self.db.rollback()
+            record = self.file_repository.get_by_id(file_id)
+            if record is None:
+                return
+            record.status = FileStatus.FAILED
+            record.error_message = self._safe_error_message(exc)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.critical(
+                "无法持久化文件处理失败状态（file_id=%s）",
+                file_id,
+                exc_info=True,
+            )
+
+    def _mark_building_failed(
+        self,
+        *,
+        file_id: str,
+        collection_name: str,
+    ) -> None:
+        try:
+            self.runtime.vector_store.set_lifecycle(collection_name, "FAILED")
+        except Exception:
+            logger.critical(
+                "无法标记首次候选 Collection 为 FAILED（file_id=%s, collection=%s）",
+                file_id,
+                collection_name,
+                exc_info=True,
+            )
+        try:
+            self.db.rollback()
+            record = self.file_repository.get_by_id(file_id)
+            if record is None:
+                return
+            knowledge_base = self.knowledge_base_repository.get_by_id(
+                record.knowledge_base_id
+            )
+            if (
+                knowledge_base is not None
+                and knowledge_base.building_collection_name == collection_name
+            ):
+                knowledge_base.rebuild_status = RebuildStatus.FAILED
+                self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.critical(
+                "无法持久化首次候选失败状态（file_id=%s）",
+                file_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _safe_error_message(exc: Exception) -> str:
+        message = exc.message if isinstance(exc, AppException) else (
+            "文件处理失败，请查看服务日志"
+        )
+        return message[:1000]
 
     def delete_file(self, file_id: str) -> FileRecord:
-        _ = file_id
-        raise FeatureNotImplementedException("文件删除功能尚未完成初始化")
+        with self.runtime.admin_operation("delete_file"):
+            return self._delete_file_locked(file_id)
+
+    def _delete_file_locked(self, file_id: str) -> FileRecord:
+        """Delete one managed file and its metadata with best-effort compensation."""
+        file_record = self.get_file(file_id)
+        if file_record.status is FileStatus.PROCESSING:
+            raise ConflictException("文件正在处理中，不能删除")
+        knowledge_base = self._get_knowledge_base(file_record.knowledge_base_id)
+        if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+            raise ConflictException("知识库正在重建，不能删除文件")
+        file_path = self._resolve_managed_file_path(file_record)
+        if file_path.exists():
+            if file_path.is_symlink() or not file_path.is_file():
+                raise FileProcessException("文件存储路径不是可删除的普通文件")
+            prospective_quarantine = file_path.with_name(
+                f".{file_record.id}.deleting"
+            )
+            if prospective_quarantine.exists():
+                raise FileProcessException("文件删除临时路径发生冲突")
+        with self.runtime.vector_write_lock:
+            self.db.expire_all()
+            file_record = self.get_file(file_id)
+            knowledge_base = self._get_knowledge_base(
+                file_record.knowledge_base_id
+            )
+            if file_record.status is FileStatus.PROCESSING:
+                raise ConflictException("文件正在处理中，不能删除")
+            if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+                raise ConflictException("知识库正在重建，不能删除文件")
+            collection_roles = (
+                (
+                    knowledge_base.active_collection_name,
+                    knowledge_base.active_embedding_config_hash,
+                    "active",
+                ),
+                (
+                    knowledge_base.previous_collection_name,
+                    knowledge_base.previous_embedding_config_hash,
+                    "previous",
+                ),
+                (
+                    knowledge_base.building_collection_name,
+                    knowledge_base.building_embedding_config_hash,
+                    "building",
+                ),
+                (knowledge_base.cleanup_collection_name, None, "cleanup"),
+            )
+            collection_names: list[str] = []
+            referenced_names = [
+                name for name, _, _ in collection_roles if name
+            ]
+            if len(referenced_names) != len(set(referenced_names)):
+                raise ConflictException("知识库 Collection 指针存在重复引用")
+            for name, config_hash, role in collection_roles:
+                if not name or name in collection_names:
+                    continue
+                self.runtime.vector_store.get_collection(
+                    name,
+                    knowledge_base_id=knowledge_base.id,
+                    expected_config_hash=config_hash,
+                    role=role,
+                    for_write=False,
+                )
+                collection_names.append(name)
+            vector_snapshots = self.runtime.vector_store.delete_by_file_id(
+                file_record.id,
+                knowledge_base_id=knowledge_base.id,
+                collection_names=collection_names,
+            )
+        quarantine_path: Path | None = None
+
+        if file_path.exists():
+            if file_path.is_symlink() or not file_path.is_file():
+                raise FileProcessException("文件存储路径不是可删除的普通文件")
+            quarantine_path = file_path.with_name(f".{file_record.id}.deleting")
+            if quarantine_path.exists():
+                raise FileProcessException("文件删除临时路径发生冲突")
+            try:
+                os.replace(file_path, quarantine_path)
+            except OSError as exc:
+                self.runtime.vector_store.restore_file_snapshots(
+                    vector_snapshots
+                )
+                raise FileProcessException("移动待删除文件失败") from exc
+
+        try:
+            self.file_repository.delete(file_record)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            self.runtime.vector_store.restore_file_snapshots(vector_snapshots)
+            if quarantine_path is not None:
+                try:
+                    os.replace(quarantine_path, file_path)
+                except OSError:
+                    logger.exception(
+                        "数据库删除失败后无法恢复隔离文件（file_id=%s）",
+                        file_record.id,
+                    )
+            raise
+
+        if quarantine_path is not None:
+            try:
+                quarantine_path.unlink()
+            except OSError as exc:
+                logger.exception(
+                    "数据库记录已删除，但隔离文件清理失败（file_id=%s）",
+                    file_record.id,
+                )
+                raise FileProcessException(
+                    "文件记录已删除，但磁盘文件清理失败",
+                    status_code=500,
+                ) from exc
+        return file_record
+
+    def _resolve_managed_file_path(self, file_record: FileRecord) -> Path:
+        """Resolve a stored relative path and prove that it is this managed upload."""
+        stored_name = file_record.stored_name
+        if (
+            not stored_name
+            or Path(stored_name).name != stored_name
+            or "/" in stored_name
+            or "\\" in stored_name
+        ):
+            raise FileProcessException("文件存储名称无效")
+
+        relative_path = Path(file_record.file_path)
+        if relative_path.is_absolute():
+            raise FileProcessException("文件存储路径必须是相对路径")
+
+        data_root = self.settings.DATA_DIR.resolve()
+        upload_root = self.settings.UPLOAD_DIR.resolve()
+        candidate = data_root / relative_path
+        if candidate.is_symlink():
+            raise FileProcessException("不允许删除符号链接")
+        resolved_path = candidate.resolve()
+        try:
+            resolved_path.relative_to(upload_root)
+        except ValueError as exc:
+            raise FileProcessException("文件存储路径超出上传目录") from exc
+        if resolved_path.name != stored_name:
+            raise FileProcessException("文件存储路径与存储名称不一致")
+        return resolved_path

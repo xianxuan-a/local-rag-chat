@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session
 
 from app.models import ChatSession, FileRecord, KnowledgeBase
@@ -68,3 +68,45 @@ class KnowledgeBaseRepository:
         self.db.delete(knowledge_base)
         self.db.flush()
         return knowledge_base
+
+    def clear_building_if_matches(
+        self,
+        knowledge_base_id: str,
+        expected_collection_name: str,
+    ) -> bool:
+        statement = (
+            update(KnowledgeBase)
+            .where(
+                KnowledgeBase.id == str(knowledge_base_id),
+                KnowledgeBase.building_collection_name
+                == expected_collection_name,
+            )
+            .values(
+                building_collection_name=None,
+                building_embedding_config_hash=None,
+                rebuild_status="IDLE",
+                rebuild_run_id=None,
+                building_started_at=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        result = self.db.execute(statement)
+        return result.rowcount == 1
+
+    def clear_cleanup_if_matches(
+        self,
+        knowledge_base_id: str,
+        expected_collection_name: str,
+    ) -> bool:
+        statement = (
+            update(KnowledgeBase)
+            .where(
+                KnowledgeBase.id == str(knowledge_base_id),
+                KnowledgeBase.cleanup_collection_name
+                == expected_collection_name,
+            )
+            .values(cleanup_collection_name=None)
+            .execution_options(synchronize_session=False)
+        )
+        result = self.db.execute(statement)
+        return result.rowcount == 1

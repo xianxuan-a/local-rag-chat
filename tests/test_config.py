@@ -26,9 +26,33 @@ def test_configured_directories_can_be_created(tmp_path: Path) -> None:
 
 
 def test_default_settings_values_are_valid() -> None:
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None, DASHSCOPE_API_KEY="")
 
     assert settings.CHUNK_SIZE == 1000
     assert settings.CHUNK_OVERLAP == 200
-    assert settings.RETRIEVAL_TOP_K == 4
+    assert settings.RETRIEVAL_TOP_K == 5
+    assert settings.RETRIEVAL_SCORE_THRESHOLD is None
+    assert settings.CHAT_MODEL is None
+    assert settings.CHAT_TEMPERATURE == 0.1
+    assert settings.CHAT_MAX_TOKENS == 1024
+    assert settings.CHAT_TIMEOUT_SECONDS == 60
+    assert settings.CHAT_MAX_ATTEMPTS == 2
+    assert settings.RAG_CONTEXT_MAX_CHARS == 12000
+    assert settings.missing_chat_configuration() == (
+        "CHAT_MODEL",
+        "DASHSCOPE_API_KEY",
+    )
+    assert settings.EMBEDDING_PROTOCOL_VERSION == "dashscope-text-embedding-v1"
+    assert settings.VECTOR_DISTANCE_METRIC == "cosine"
     assert settings.ALLOWED_FILE_EXTENSIONS == [".txt", ".pdf", ".csv", ".json"]
+
+
+def test_legacy_chat_model_sentinel_is_treated_as_unconfigured() -> None:
+    settings = Settings(
+        _env_file=None,
+        CHAT_MODEL="not-configured",
+        DASHSCOPE_API_KEY="test-key",
+    )
+
+    assert settings.CHAT_MODEL is None
+    assert settings.missing_chat_configuration() == ("CHAT_MODEL",)

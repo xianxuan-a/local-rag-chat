@@ -13,6 +13,14 @@ services:
       METADATA_DIR: "/app/data/metadata"
       CHAT_HISTORY_DIR: "/app/data/chat_history"
       DATABASE_URL: "sqlite:////app/data/metadata/local_rag_chat.db"
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
+      DASHSCOPE_BASE_URL: "${DASHSCOPE_BASE_URL:-}"
+      CHAT_MODEL: "${CHAT_MODEL:-}"
+      CHAT_TEMPERATURE: "${CHAT_TEMPERATURE:-0.1}"
+      CHAT_MAX_TOKENS: "${CHAT_MAX_TOKENS:-1024}"
+      CHAT_TIMEOUT_SECONDS: "${CHAT_TIMEOUT_SECONDS:-60}"
+      CHAT_MAX_ATTEMPTS: "${CHAT_MAX_ATTEMPTS:-2}"
+      RAG_CONTEXT_MAX_CHARS: "${RAG_CONTEXT_MAX_CHARS:-12000}"
     ports:
       - "8000:8000"
     volumes:

@@ -4,6 +4,33 @@ import re
 
 
 _WHITESPACE = re.compile(r"\s+")
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_HORIZONTAL_WHITESPACE = re.compile(r"[^\S\n]+")
+
+
+def clean_text(text: str) -> str:
+    """Remove deterministic noise while preserving paragraph boundaries."""
+    if not isinstance(text, str):
+        raise TypeError("text 必须是字符串")
+
+    normalized = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _CONTROL_CHARACTERS.sub("", normalized)
+
+    cleaned_lines: list[str] = []
+    previous_was_blank = False
+    for raw_line in normalized.split("\n"):
+        line = _HORIZONTAL_WHITESPACE.sub(" ", raw_line).strip()
+        if not line:
+            if cleaned_lines and not previous_was_blank:
+                cleaned_lines.append("")
+            previous_was_blank = True
+            continue
+        cleaned_lines.append(line)
+        previous_was_blank = False
+
+    while cleaned_lines and not cleaned_lines[-1]:
+        cleaned_lines.pop()
+    return "\n".join(cleaned_lines)
 
 
 def normalize_text(text: str) -> str:

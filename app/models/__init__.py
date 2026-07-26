@@ -15,7 +15,7 @@ from app.models.base import (
 from app.models.chat_message import ChatMessage, MessageRole
 from app.models.chat_session import ChatSession
 from app.models.file_record import FileRecord, FileStatus
-from app.models.knowledge_base import KnowledgeBase
+from app.models.knowledge_base import KnowledgeBase, RebuildStatus
 
 __all__ = [
     "Base",
@@ -24,6 +24,7 @@ __all__ = [
     "FileRecord",
     "FileStatus",
     "KnowledgeBase",
+    "RebuildStatus",
     "MessageRole",
     "TimestampMixin",
     "UTCDateTime",

@@ -12,6 +12,7 @@ def main() -> None:
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.DEBUG,
+        workers=1,
     )
 
 

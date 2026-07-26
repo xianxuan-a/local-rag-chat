@@ -1,18 +1,19 @@
-"""Typed persistence contract for chat sessions and messages."""
+"""Data-access operations for chat sessions and messages."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
 
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import FeatureNotImplementedException
 from app.models import ChatMessage, ChatSession, MessageRole
+from app.models.base import utc_now
 
 
 class SessionRepository:
-    """Reserve session persistence operations for the later chat phase."""
+    """Persist chat history without owning transaction boundaries."""
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -20,18 +21,35 @@ class SessionRepository:
     def create_session(
         self, knowledge_base_id: str, title: str
     ) -> ChatSession:
-        _ = (knowledge_base_id, title)
-        raise FeatureNotImplementedException("会话创建功能尚未完成初始化")
+        chat_session = ChatSession(
+            knowledge_base_id=str(knowledge_base_id),
+            title=title,
+        )
+        self.db.add(chat_session)
+        self.db.flush()
+        self.db.refresh(chat_session)
+        return chat_session
 
     def get_session(self, session_id: str) -> ChatSession | None:
-        _ = session_id
-        raise FeatureNotImplementedException("会话查询功能尚未完成初始化")
+        statement = select(ChatSession).where(
+            ChatSession.id == str(session_id)
+        )
+        return self.db.scalar(statement)
 
     def list_sessions(
-        self, knowledge_base_id: str | None = None
+        self, knowledge_base_id: str
     ) -> list[ChatSession]:
-        _ = knowledge_base_id
-        raise FeatureNotImplementedException("会话列表功能尚未完成初始化")
+        statement = (
+            select(ChatSession)
+            .where(
+                ChatSession.knowledge_base_id == str(knowledge_base_id)
+            )
+            .order_by(
+                ChatSession.updated_at.desc(),
+                ChatSession.id.desc(),
+            )
+        )
+        return list(self.db.scalars(statement).all())
 
     def save_message(
         self,
@@ -40,13 +58,50 @@ class SessionRepository:
         content: str,
         references: Sequence[dict[str, Any]] | None = None,
     ) -> ChatMessage:
-        _ = (session_id, role, content, references)
-        raise FeatureNotImplementedException("消息保存功能尚未完成初始化")
+        message = ChatMessage(
+            session_id=str(session_id),
+            role=role if isinstance(role, MessageRole) else MessageRole(role),
+            content=content,
+            references=list(references or ()),
+        )
+        self.db.add(message)
+        self.db.flush()
+        self.db.refresh(message)
+        return message
 
     def list_messages(self, session_id: str) -> list[ChatMessage]:
-        _ = session_id
-        raise FeatureNotImplementedException("消息列表功能尚未完成初始化")
+        statement = (
+            select(ChatMessage)
+            .where(ChatMessage.session_id == str(session_id))
+            .order_by(
+                ChatMessage.created_at.asc(),
+                ChatMessage.id.asc(),
+            )
+        )
+        return list(self.db.scalars(statement).all())
+
+    def update_activity(
+        self,
+        chat_session: ChatSession,
+        *,
+        title: str | None = None,
+    ) -> ChatSession:
+        if title is not None:
+            chat_session.title = title
+        chat_session.updated_at = utc_now()
+        self.db.flush()
+        self.db.refresh(chat_session)
+        return chat_session
+
+    def delete_messages(self, session_id: str) -> int:
+        statement = delete(ChatMessage).where(
+            ChatMessage.session_id == str(session_id)
+        )
+        result = self.db.execute(statement)
+        self.db.flush()
+        return int(result.rowcount or 0)
 
     def delete_session(self, chat_session: ChatSession) -> ChatSession:
-        _ = chat_session
-        raise FeatureNotImplementedException("会话删除功能尚未完成初始化")
+        self.db.delete(chat_session)
+        self.db.flush()
+        return chat_session

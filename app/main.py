@@ -14,6 +14,7 @@ from app.core.exceptions import AppException
 from app.core.logger import configure_logging, get_logger
 from app.core.response import error_response, success_response
 from app.database.sqlite import init_database
+from app.services.runtime_coordinator import RuntimeCoordinator
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -28,6 +29,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.engine = engine
         application.state.session_factory = session_factory
         application.state.settings = app_settings
+        application.state.rag_runtime = RuntimeCoordinator(app_settings)
+        missing_chat_settings = app_settings.missing_chat_configuration()
+        if missing_chat_settings:
+            get_logger(__name__).warning(
+                "RAG 聊天暂不可用，缺少配置：%s",
+                ", ".join(missing_chat_settings),
+            )
         get_logger(__name__).info(
             "%s %s started", app_settings.APP_NAME, app_settings.APP_VERSION
         )
@@ -39,7 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application = FastAPI(
         title=app_settings.APP_NAME,
-        description="Local RAG knowledge-base API (initialization phase)",
+        description="Local RAG knowledge-base indexing and question-answering API",
         version=app_settings.APP_VERSION,
         debug=app_settings.DEBUG,
         lifespan=lifespan,

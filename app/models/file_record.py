@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Enum as SqlEnum,
     ForeignKey,
@@ -16,7 +17,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, TimestampMixin, UTCDateTime, UUIDPrimaryKeyMixin
+from datetime import datetime
 
 if TYPE_CHECKING:
     from app.models.knowledge_base import KnowledgeBase
@@ -67,6 +69,15 @@ class FileRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    has_active_vectors: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+    active_index_config_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    last_successful_indexed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), nullable=True
+    )
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="files")
 

@@ -9,13 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.chat import SourceReference
 
 
+DEFAULT_SESSION_TITLE = "新会话"
+
+
 class SessionCreate(BaseModel):
-    """Payload reserved for creating a chat session."""
+    """Payload for creating a chat session under one knowledge base."""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     knowledge_base_id: UUID
-    title: str = Field(default="新会话", min_length=1, max_length=200)
+    title: str = Field(default=DEFAULT_SESSION_TITLE, min_length=1, max_length=200)
 
 
 class SessionResponse(BaseModel):

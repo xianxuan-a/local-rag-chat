@@ -14,10 +14,16 @@ from app.utils.id_utils import (
     generate_message_id,
     generate_session_id,
 )
-from app.utils.text_utils import estimate_text_length, normalize_text, truncate_text
+from app.utils.text_utils import (
+    clean_text,
+    estimate_text_length,
+    normalize_text,
+    truncate_text,
+)
 
 __all__ = [
     "ensure_directory",
+    "clean_text",
     "estimate_text_length",
     "generate_chunk_id",
     "generate_file_id",

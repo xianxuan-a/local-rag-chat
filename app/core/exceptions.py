@@ -69,3 +69,8 @@ class VectorStoreException(AppException):
 class ModelServiceException(AppException):
     default_message = "模型服务异常"
     default_status_code = 500
+
+
+class ConfigurationException(AppException):
+    default_message = "服务配置不完整"
+    default_status_code = 500

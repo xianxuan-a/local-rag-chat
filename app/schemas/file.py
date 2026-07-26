@@ -25,6 +25,7 @@ class FileRecordResponse(BaseModel):
     status: FileStatus
     chunk_count: int = Field(ge=0)
     error_message: str | None
+    last_successful_indexed_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

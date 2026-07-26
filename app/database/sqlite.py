@@ -6,7 +6,7 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -68,6 +68,63 @@ def create_tables(engine: Engine) -> None:
     """Create all currently registered tables idempotently."""
 
     Base.metadata.create_all(bind=engine)
+    ensure_runtime_columns(engine)
+
+
+_RUNTIME_COLUMNS: dict[str, dict[str, str]] = {
+    "file_records": {
+        "has_active_vectors": "BOOLEAN NOT NULL DEFAULT 0",
+        "active_index_config_hash": "VARCHAR(64)",
+        "last_successful_indexed_at": "DATETIME",
+    },
+    "knowledge_bases": {
+        "active_collection_name": "VARCHAR(63)",
+        "active_embedding_config_hash": "VARCHAR(64)",
+        "previous_collection_name": "VARCHAR(63)",
+        "previous_embedding_config_hash": "VARCHAR(64)",
+        "building_collection_name": "VARCHAR(63)",
+        "building_embedding_config_hash": "VARCHAR(64)",
+        "cleanup_collection_name": "VARCHAR(63)",
+        "rebuild_status": "VARCHAR(8) NOT NULL DEFAULT 'IDLE'",
+        "rebuild_run_id": "VARCHAR(36)",
+        "building_started_at": "DATETIME",
+    },
+}
+
+
+def ensure_runtime_columns(engine: Engine) -> None:
+    """Add only the explicitly supported nullable/defaulted runtime columns."""
+
+    inspector = inspect(engine)
+    missing: dict[str, list[str]] = {}
+    for table_name, columns in _RUNTIME_COLUMNS.items():
+        if not inspector.has_table(table_name):
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table_name)}
+        absent = [name for name in columns if name not in existing]
+        if absent:
+            missing[table_name] = absent
+
+    if not missing:
+        return
+    if engine.dialect.name != "sqlite":
+        details = ", ".join(
+            f"{table}: {', '.join(names)}" for table, names in missing.items()
+        )
+        raise RuntimeError(
+            "数据库缺少文件索引运行时字段，请先执行人工迁移：" + details
+        )
+
+    with engine.begin() as connection:
+        for table_name, column_names in missing.items():
+            for column_name in column_names:
+                definition = _RUNTIME_COLUMNS[table_name][column_name]
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" '
+                        f'ADD COLUMN "{column_name}" {definition}'
+                    )
+                )
 
 
 def init_database(database_url: str) -> tuple[Engine, SessionFactory]:
