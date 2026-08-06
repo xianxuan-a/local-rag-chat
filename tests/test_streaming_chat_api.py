@@ -11,8 +11,10 @@ from dashscope.common.error import RequestFailure
 from pydantic import SecretStr
 
 from app.api.chat import stream_chat
+from app.models import User
 from app.schemas.chat import ChatRequest
 from tests.fakes import FakeEmbedding
+from tests.conftest import wait_for_job
 
 
 def _stream_response(content: str) -> GenerationResponse:
@@ -58,7 +60,9 @@ def _prepare_indexed_knowledge_base(
         },
     )
     file_id = uploaded.json()["data"]["id"]
-    assert client.post(f"/api/files/{file_id}/process").status_code == 200
+    assert wait_for_job(
+        client, client.post(f"/api/files/{file_id}/process")
+    )["status"] == "SUCCEEDED"
     return knowledge_base_id, file_id
 
 
@@ -89,7 +93,7 @@ def test_streaming_chat_emits_real_deltas_sources_and_done(
         return iter(
             [
                 _stream_response("流式"),
-                _stream_response("回答 [S1]"),
+                _stream_response("回答 [K1]"),
             ]
         )
 
@@ -122,14 +126,14 @@ def test_streaming_chat_emits_real_deltas_sources_and_done(
     events = _parse_events(response)
     assert [event["type"] for event in events] == [
         "start",
-        "delta",
+        "retrieval",
         "delta",
         "sources",
         "done",
     ]
     assert "".join(
         event["content"] for event in events if event["type"] == "delta"
-    ) == "流式回答 [S1]"
+    ) == "流式回答 [K1]"
     assert events[-2]["sources"][0]["file_id"] == file_id
     assert calls[0]["stream"] is True
     assert calls[0]["incremental_output"] is True
@@ -139,11 +143,11 @@ def test_streaming_chat_emits_real_deltas_sources_and_done(
         params={"knowledge_base_id": knowledge_base_id},
     ).json()["data"]
     assert [message["role"] for message in history] == ["user", "assistant"]
-    assert history[1]["content"] == "流式回答 [S1]"
+    assert history[1]["content"] == "流式回答 [K1]"
     assert history[1]["references"][0]["file_id"] == file_id
 
 
-def test_midstream_provider_failure_emits_error_and_saves_no_messages(
+def test_midstream_provider_failure_emits_error_and_saves_partial_state(
     client,
     app,
     test_settings,
@@ -189,7 +193,7 @@ def test_midstream_provider_failure_emits_error_and_saves_no_messages(
     events = _parse_events(response)
     assert [event["type"] for event in events] == [
         "start",
-        "delta",
+        "retrieval",
         "error",
     ]
     assert events[-1]["code"] == 503
@@ -197,7 +201,11 @@ def test_midstream_provider_failure_emits_error_and_saves_no_messages(
         f"/api/sessions/{created_session['id']}/messages",
         params={"knowledge_base_id": knowledge_base_id},
     )
-    assert history.json()["data"] == []
+    messages = history.json()["data"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == ""
+    assert messages[1]["status"] == "failed"
+    assert messages[1]["error_code"] == "MODEL_UNAVAILABLE"
 
 
 def test_streaming_chat_rejects_cross_knowledge_base_session(
@@ -230,7 +238,7 @@ def test_streaming_chat_rejects_cross_knowledge_base_session(
     assert response.json()["code"] == 404
 
 
-def test_client_disconnect_closes_provider_and_saves_no_partial_answer(
+def test_client_disconnect_closes_provider_and_saves_cancelled_partial_answer(
     client,
     app,
     test_settings,
@@ -255,7 +263,7 @@ def test_client_disconnect_closes_provider_and_saves_no_partial_answer(
             self.closed = False
             self.responses = iter(
                 [
-                    _stream_response("第一段"),
+                    _stream_response("第一段 [K1]"),
                     _stream_response("不会完成"),
                 ]
             )
@@ -275,6 +283,11 @@ def test_client_disconnect_closes_provider_and_saves_no_partial_answer(
         lambda **_kwargs: provider,
     )
     db = app.state.session_factory()
+    user = (
+        db.query(User)
+        .filter(User.email_normalized == "test-admin@example.com")
+        .one()
+    )
     response = stream_chat(
         ChatRequest(
             knowledge_base_id=knowledge_base_id,
@@ -285,18 +298,22 @@ def test_client_disconnect_closes_provider_and_saves_no_partial_answer(
         db,
         test_settings,
         app.state.rag_runtime,
+        user,
+        None,
     )
 
-    async def consume_two_events_and_disconnect() -> None:
+    async def consume_three_events_and_disconnect() -> None:
         iterator = response.body_iterator
         start = await anext(iterator)
+        retrieval = await anext(iterator)
         delta = await anext(iterator)
         assert json.loads(start)["type"] == "start"
+        assert json.loads(retrieval)["type"] == "retrieval"
         assert json.loads(delta)["type"] == "delta"
         await iterator.aclose()
 
     try:
-        anyio.run(consume_two_events_and_disconnect)
+        anyio.run(consume_three_events_and_disconnect)
     finally:
         db.close()
 
@@ -305,4 +322,7 @@ def test_client_disconnect_closes_provider_and_saves_no_partial_answer(
         f"/api/sessions/{created_session['id']}/messages",
         params={"knowledge_base_id": knowledge_base_id},
     )
-    assert history.json()["data"] == []
+    messages = history.json()["data"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == "第一段 [K1]"
+    assert messages[1]["status"] == "cancelled"

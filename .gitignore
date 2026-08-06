@@ -25,10 +25,12 @@ Thumbs.db
 
 # 日志和数据库
 logs/
+artifacts/
 *.log
 *.db
 *.db-shm
 *.db-wal
+*.db.pre-cutover-*
 *.sqlite
 *.sqlite3
 
@@ -41,3 +43,15 @@ data/metadata/*
 !data/metadata/.gitkeep
 data/chat_history/*
 !data/chat_history/.gitkeep
+data/.instance.lock
+data/.local-rag-launch-state.json
+data/.local-rag-runtime.json
+data/backups/*
+!data/backups/.gitkeep
+.local-rag-chat.json
+data/evaluations/*
+!data/evaluations/.gitkeep
+
+# 前端构建、测试与视觉验收产物
+frontend/dist-*/
+frontend/artifacts/

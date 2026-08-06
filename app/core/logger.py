@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 from pathlib import Path
 
@@ -45,7 +46,12 @@ def configure_logging(app_settings: Settings | None = None) -> logging.Logger:
         file_handler.close()
         file_handler = None
     if file_handler is None:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=current_settings.LOG_MAX_BYTES,
+            backupCount=current_settings.LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         setattr(file_handler, _HANDLER_MARKER, "file")
         root_logger.addHandler(file_handler)
     file_handler.setLevel(level)

@@ -8,6 +8,7 @@ from dashscope.api_entities.dashscope_response import GenerationResponse
 from pydantic import SecretStr
 
 from tests.fakes import FakeEmbedding
+from tests.conftest import wait_for_job
 
 
 def _success_response(content: str) -> GenerationResponse:
@@ -44,7 +45,7 @@ def test_chat_api_runs_real_retrieval_and_rag_pipeline(
     def fake_generation(**_kwargs):
         nonlocal generation_calls
         generation_calls += 1
-        return _success_response("测试回答 [S1]")
+        return _success_response("测试回答 [K1]")
 
     monkeypatch.setattr(
         "app.services.chat_model_service.Generation.call",
@@ -67,7 +68,9 @@ def test_chat_api_runs_real_retrieval_and_rag_pipeline(
         },
     )
     file_id = uploaded.json()["data"]["id"]
-    assert client.post(f"/api/files/{file_id}/process").status_code == 200
+    assert wait_for_job(
+        client, client.post(f"/api/files/{file_id}/process")
+    )["status"] == "SUCCEEDED"
 
     response = client.post(
         "/api/chat",
@@ -75,12 +78,17 @@ def test_chat_api_runs_real_retrieval_and_rag_pipeline(
             "knowledge_base_id": knowledge_base_id,
             "question": "测试正文是什么？",
             "top_k": 4,
+            "mode": "hybrid",
         },
     )
 
     assert response.status_code == 200
     response_data = response.json()["data"]
-    assert response_data["answer"] == "测试回答 [S1]"
+    assert response_data["answer"] == "测试回答 [K1]"
+    assert response_data["requested_mode"] == "hybrid"
+    assert response_data["effective_mode"] == "knowledge_only"
+    assert response_data["web_search_status"] == "blocked_by_policy"
+    assert response_data["fallback_reason"] == "global_web_search_disabled"
     assert response_data["sources"][0]["file_id"] == file_id
     assert response_data["sources"][0]["content_preview"].startswith(
         "这是完整的 RAG 测试正文"
@@ -93,7 +101,9 @@ def test_chat_api_runs_real_retrieval_and_rag_pipeline(
     messages = history.json()["data"]
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["content"] == "测试正文是什么？"
-    assert messages[1]["content"] == "测试回答 [S1]"
+    assert messages[1]["content"] == "测试回答 [K1]"
+    assert messages[1]["requested_mode"] == "hybrid"
+    assert messages[1]["effective_mode"] == "knowledge_only"
     assert messages[1]["references"][0]["file_id"] == file_id
     assert generation_calls == 1
     assert fake_embedding.document_calls == 1

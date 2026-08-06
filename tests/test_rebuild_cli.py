@@ -21,8 +21,10 @@ def _response(status_code: int, payload: dict) -> SimpleNamespace:
 def test_cli_posts_rebuild_and_preserves_server_json(monkeypatch, capsys) -> None:
     captured: dict = {}
 
-    def post(url: str, timeout: float):
-        captured.update(url=url, timeout=timeout)
+    def request(method: str, url: str, headers: dict, timeout: float):
+        captured.update(
+            method=method, url=url, headers=headers, timeout=timeout
+        )
         return _response(
             200,
             {
@@ -31,7 +33,7 @@ def test_cli_posts_rebuild_and_preserves_server_json(monkeypatch, capsys) -> Non
             },
         )
 
-    monkeypatch.setattr(rebuild_kb.requests, "post", post)
+    monkeypatch.setattr(rebuild_kb.requests, "request", request)
 
     exit_code = rebuild_kb.main(
         [
@@ -41,15 +43,19 @@ def test_cli_posts_rebuild_and_preserves_server_json(monkeypatch, capsys) -> Non
             "http://service.test/",
             "--timeout-seconds",
             "15",
+            "--token",
+            "test-token",
         ]
     )
 
     assert exit_code == 0
     assert captured == {
+        "method": "POST",
         "url": (
             "http://service.test/api/knowledge-bases/"
             "00000000-0000-0000-0000-000000000001/rebuild"
         ),
+        "headers": {"Authorization": "Bearer test-token"},
         "timeout": 15.0,
     }
     assert '"switched": true' in capsys.readouterr().out
@@ -58,21 +64,25 @@ def test_cli_posts_rebuild_and_preserves_server_json(monkeypatch, capsys) -> Non
 def test_cli_exit_code_mapping(monkeypatch) -> None:
     monkeypatch.setattr(
         rebuild_kb.requests,
-        "post",
+        "request",
         lambda *_args, **_kwargs: _response(
             409, {"code": 409, "message": "conflict"}
         ),
     )
-    assert rebuild_kb.main(["--knowledge-base-id", "kb"]) == 1
+    assert rebuild_kb.main(
+        ["--knowledge-base-id", "kb", "--token", "test-token"]
+    ) == 2
 
     monkeypatch.setattr(
         rebuild_kb.requests,
-        "post",
+        "request",
         lambda *_args, **_kwargs: _response(
             404, {"code": 404, "message": "missing"}
         ),
     )
-    assert rebuild_kb.main(["--knowledge-base-id", "kb"]) == 2
+    assert rebuild_kb.main(
+        ["--knowledge-base-id", "kb", "--token", "test-token"]
+    ) == 2
 
 
 def test_cli_source_does_not_import_database_or_chroma_services() -> None:

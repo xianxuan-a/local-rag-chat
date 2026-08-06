@@ -24,6 +24,7 @@ from app.core.exceptions import (
     VectorStoreException,
 )
 from app.core.logger import get_logger
+from app.core.observability import EMBEDDING_ERRORS
 from app.services.embedding_service import (
     DashScopeEmbeddingAdapter,
     EmbeddingConfig,
@@ -228,6 +229,26 @@ class VectorStoreService:
             raise VectorStoreException("读取 Chroma Collection 失败") from exc
         return True
 
+    def list_collections(self) -> list[Any]:
+        """Return Chroma collection handles without installing embedding functions."""
+
+        try:
+            listed = self.client.list_collections()
+            collections: list[Any] = []
+            for item in listed:
+                if isinstance(item, str):
+                    collections.append(
+                        self.client.get_collection(
+                            name=item,
+                            embedding_function=None,
+                        )
+                    )
+                else:
+                    collections.append(item)
+            return collections
+        except Exception as exc:
+            raise VectorStoreException("列出 Chroma Collection 失败") from exc
+
     def get_collection(
         self,
         name: str,
@@ -353,12 +374,22 @@ class VectorStoreService:
         if not documents:
             raise ValidationException("待向量化文档不能为空")
         texts = [document.page_content for document in documents]
-        vectors = self.get_embeddings(config).embed_documents(texts)
-        return self._normalize_vectors(vectors, len(texts), config.dimension)
+        try:
+            vectors = self.get_embeddings(config).embed_documents(texts)
+            return self._normalize_vectors(
+                vectors, len(texts), config.dimension
+            )
+        except Exception:
+            EMBEDDING_ERRORS.inc()
+            raise
 
     def embed_query(self, query: str, config: EmbeddingConfig) -> list[float]:
-        vector = self.get_embeddings(config).embed_query(query)
-        return self._normalize_vectors([vector], 1, config.dimension)[0]
+        try:
+            vector = self.get_embeddings(config).embed_query(query)
+            return self._normalize_vectors([vector], 1, config.dimension)[0]
+        except Exception:
+            EMBEDDING_ERRORS.inc()
+            raise
 
     @staticmethod
     def _normalize_vectors(
@@ -414,6 +445,7 @@ class VectorStoreService:
         knowledge_base_id: str,
         file_id: str,
         config: EmbeddingConfig,
+        recovery_metadata: dict[str, str | int] | None = None,
     ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
         ids: list[str] = []
         contents: list[str] = []
@@ -438,6 +470,8 @@ class VectorStoreService:
             seen_chunk_ids.add(chunk_id)
             metadata["embedding_config_hash"] = config.config_hash
             metadata["embedding_protocol_version"] = config.protocol_version
+            if recovery_metadata:
+                metadata.update(self._sanitize_metadata(recovery_metadata))
             ids.append(self.vector_id(knowledge_base_id, file_id, chunk_id))
             contents.append(document.page_content)
             metadatas.append(metadata)
@@ -575,12 +609,25 @@ class VectorStoreService:
         embeddings: Sequence[Sequence[float]],
         config: EmbeddingConfig,
         role: Literal["active", "building"],
+        processing_job_id: str | None = None,
+        vector_run_id: str | None = None,
+        expected_chunk_count: int | None = None,
     ) -> VectorWriteReceipt:
+        recovery_metadata: dict[str, str | int] = {
+            "target_collection": collection_name,
+        }
+        if processing_job_id is not None:
+            recovery_metadata["processing_job_id"] = processing_job_id
+        if vector_run_id is not None:
+            recovery_metadata["vector_run_id"] = vector_run_id
+        if expected_chunk_count is not None:
+            recovery_metadata["expected_chunk_count"] = expected_chunk_count
         ids, contents, metadatas = self.prepare_documents(
             documents,
             knowledge_base_id=knowledge_base_id,
             file_id=file_id,
             config=config,
+            recovery_metadata=recovery_metadata,
         )
         normalized = self._normalize_vectors(
             [list(vector) for vector in embeddings],
@@ -813,19 +860,39 @@ class VectorStoreService:
             )
         return output
 
-    def snapshot_collection(self, name: str) -> CollectionSnapshot:
+    def snapshot_collection(
+        self, name: str, *, batch_size: int = 500
+    ) -> CollectionSnapshot:
+        if batch_size < 1:
+            raise ValueError("batch_size 必须大于 0")
         collection = self.get_collection(name)
+        vectors = VectorSnapshot.empty()
         try:
-            result = collection.get(
-                include=["documents", "metadatas", "embeddings"]
-            )
+            expected_count = int(collection.count())
+            for offset in range(0, expected_count, batch_size):
+                batch = self._snapshot_from_result(
+                    collection.get(
+                        include=["documents", "metadatas", "embeddings"],
+                        limit=batch_size,
+                        offset=offset,
+                    )
+                )
+                vectors.ids.extend(batch.ids)
+                vectors.documents.extend(batch.documents)
+                vectors.metadatas.extend(batch.metadatas)
+                vectors.embeddings.extend(batch.embeddings)
         except Exception as exc:
             raise VectorStoreException("读取 Collection 快照失败") from exc
+        if (
+            len(vectors.ids) != expected_count
+            or len(set(vectors.ids)) != len(vectors.ids)
+        ):
+            raise VectorStoreException("Collection 分批快照数量或 ID 唯一性校验失败")
         return CollectionSnapshot(
             name=name,
             metadata=dict(collection.metadata),
             configuration=dict(collection.configuration),
-            vectors=self._snapshot_from_result(result),
+            vectors=vectors,
         )
 
     def delete_collection(self, name: str) -> None:
@@ -844,18 +911,20 @@ class VectorStoreService:
                 self.delete_collection(snapshot.name)
             collection = self.client.create_collection(
                 name=snapshot.name,
-                configuration={"hnsw": {"space": "cosine"}},
+                configuration=snapshot.configuration,
                 metadata=snapshot.metadata,
                 embedding_function=None,
             )
             if snapshot.vectors.ids:
-                self._upsert_precomputed(
-                    collection,
-                    ids=snapshot.vectors.ids,
-                    documents=snapshot.vectors.documents,
-                    metadatas=snapshot.vectors.metadatas,
-                    embeddings=snapshot.vectors.embeddings,
-                )
+                for offset in range(0, len(snapshot.vectors.ids), 500):
+                    end = offset + 500
+                    self._upsert_precomputed(
+                        collection,
+                        ids=snapshot.vectors.ids[offset:end],
+                        documents=snapshot.vectors.documents[offset:end],
+                        metadatas=snapshot.vectors.metadatas[offset:end],
+                        embeddings=snapshot.vectors.embeddings[offset:end],
+                    )
         self.validate_collection(
             collection,
             knowledge_base_id=str(snapshot.metadata["knowledge_base_id"]),
@@ -880,12 +949,13 @@ class VectorStoreService:
         config_hash: str,
         expected_file_ids: set[str],
         expected_counts: dict[str, int],
+        role: CollectionRole = "building",
     ) -> None:
         collection = self.get_collection(
             name,
             knowledge_base_id=knowledge_base_id,
             expected_config_hash=config_hash,
-            role="building",
+            role=role,
             for_write=False,
         )
         result = collection.get(include=["metadatas", "embeddings", "documents"])

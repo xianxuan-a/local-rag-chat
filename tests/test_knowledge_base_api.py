@@ -47,6 +47,30 @@ def test_duplicate_name_returns_conflict(client: TestClient) -> None:
     assert response.json()["code"] == 409
 
 
+def test_update_persists_name_and_description(client: TestClient) -> None:
+    first = create_knowledge_base(client, "可编辑知识库")
+    create_knowledge_base(client, "冲突名称")
+
+    updated = client.patch(
+        f"/api/knowledge-bases/{first['id']}",
+        json={"name": "编辑后名称", "description": ""},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["name"] == "编辑后名称"
+    assert updated.json()["data"]["description"] is None
+    fetched = client.get(f"/api/knowledge-bases/{first['id']}")
+    assert fetched.json()["data"]["name"] == "编辑后名称"
+
+    conflict = client.patch(
+        f"/api/knowledge-bases/{first['id']}",
+        json={"name": "冲突名称"},
+    )
+    assert conflict.status_code == 409
+
+    empty = client.patch(f"/api/knowledge-bases/{first['id']}", json={})
+    assert empty.status_code == 422
+
+
 def test_invalid_uuid_returns_uniform_422(client: TestClient) -> None:
     response = client.get("/api/knowledge-bases/not-a-uuid")
 

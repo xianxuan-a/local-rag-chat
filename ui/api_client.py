@@ -9,8 +9,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 import math
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import requests
@@ -57,6 +58,8 @@ class ApiClient:
         base_url: str,
         timeout_seconds: float = 3.0,
         stream_timeout_seconds: float = 120.0,
+        access_token: str | None = None,
+        on_auth_failure: Callable[[], None] | None = None,
     ) -> None:
         normalized_url = base_url.strip().rstrip("/")
         if not normalized_url:
@@ -71,10 +74,30 @@ class ApiClient:
         self.base_url = normalized_url
         self.timeout_seconds = timeout_seconds
         self.stream_timeout_seconds = stream_timeout_seconds
+        self.access_token = access_token
+        self.on_auth_failure = on_auth_failure
+
+    def set_access_token(self, token: str | None) -> None:
+        self.access_token = token
+
+    def set_auth_failure_handler(
+        self, handler: Callable[[], None] | None
+    ) -> None:
+        self.on_auth_failure = handler
+
+    def _authenticated_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        if not self.access_token:
+            return kwargs
+        updated = dict(kwargs)
+        headers = dict(updated.pop("headers", {}) or {})
+        headers.setdefault("Authorization", f"Bearer {self.access_token}")
+        updated["headers"] = headers
+        return updated
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         url = f"{self.base_url}{path}"
         request_timeout = kwargs.pop("_timeout_seconds", self.timeout_seconds)
+        kwargs = self._authenticated_kwargs(kwargs)
         try:
             response = requests.request(
                 method=method,
@@ -93,8 +116,7 @@ class ApiClient:
 
         return self._unwrap_response(response)
 
-    @staticmethod
-    def _unwrap_response(response: requests.Response) -> Any:
+    def _unwrap_response(self, response: requests.Response) -> Any:
         try:
             payload = response.json()
         except ValueError as exc:
@@ -106,6 +128,10 @@ class ApiClient:
         message = str(payload.get("message") or "请求失败")
         code = payload.get("code")
         if not response.ok:
+            if response.status_code == 401 and self.access_token:
+                self.access_token = None
+                if self.on_auth_failure is not None:
+                    self.on_auth_failure()
             raise ApiClientError(f"{message}（HTTP {response.status_code}）")
         if code != 0:
             raise ApiClientError(f"{message}（业务码 {code}）")
@@ -117,6 +143,39 @@ class ApiClient:
         data = self._request("GET", "/health")
         if not isinstance(data, dict):
             raise ApiClientError("健康检查响应格式错误")
+        return data
+
+    def login(self, identity: str, password: str) -> dict[str, Any]:
+        data = self._request(
+            "POST",
+            "/api/auth/login",
+            json={"identity": identity, "password": password},
+        )
+        if not isinstance(data, dict) or not isinstance(
+            data.get("access_token"), str
+        ):
+            raise ApiClientError("登录响应格式错误")
+        self.access_token = data["access_token"]
+        return data
+
+    def register(
+        self, username: str, password: str, email: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "username": username,
+            "password": password,
+        }
+        if email:
+            payload["email"] = email
+        data = self._request("POST", "/api/auth/register", json=payload)
+        if not isinstance(data, dict):
+            raise ApiClientError("注册响应格式错误")
+        return data
+
+    def me(self) -> dict[str, Any]:
+        data = self._request("GET", "/api/auth/me")
+        if not isinstance(data, dict):
+            raise ApiClientError("用户响应格式错误")
         return data
 
     def list_knowledge_bases(self) -> list[dict[str, Any]]:
@@ -197,6 +256,29 @@ class ApiClient:
         if not isinstance(data, dict):
             raise ApiClientError("文件处理响应格式错误")
         return data
+
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        data = self._request("GET", f"/api/jobs/{job_id}")
+        if not isinstance(data, dict):
+            raise ApiClientError("Job 响应格式错误")
+        return data
+
+    def wait_for_job(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict[str, Any]:
+        timeout = timeout_seconds or self.stream_timeout_seconds
+        deadline = time.monotonic() + timeout
+        while True:
+            job = self.get_job(job_id)
+            if job.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                return job
+            if time.monotonic() >= deadline:
+                raise ApiClientError(f"等待 Job 超时（{timeout:g} 秒）")
+            time.sleep(poll_interval_seconds)
 
     def delete_file(self, file_id: str) -> dict[str, Any]:
         data = self._request("DELETE", f"/api/files/{file_id}")
@@ -324,6 +406,7 @@ class ApiClient:
                     self.timeout_seconds,
                     self.stream_timeout_seconds,
                 ),
+                **self._authenticated_kwargs({}),
             )
         except requests.Timeout as exc:
             raise ApiClientError("建立流式回答连接超时") from exc

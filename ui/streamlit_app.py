@@ -21,6 +21,8 @@ def _initialize_state() -> None:
         "processing_file_ids": [],
         "streaming": False,
         "last_error": None,
+        "access_token": None,
+        "current_user": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -59,6 +61,55 @@ def main() -> None:
                 st.success(f"系统状态：后端运行正常（{client.base_url}）")
             else:
                 st.warning("系统状态：后端健康检查未返回 ok。")
+
+    if backend_available:
+        def clear_expired_authentication() -> None:
+            st.session_state["access_token"] = None
+            st.session_state["current_user"] = None
+
+        client.set_auth_failure_handler(clear_expired_authentication)
+        token = st.session_state.get("access_token")
+        if isinstance(token, str) and token:
+            client.set_access_token(token)
+            try:
+                st.session_state["current_user"] = client.me()
+            except ApiClientError:
+                client.set_access_token(None)
+                st.session_state["access_token"] = None
+                st.session_state["current_user"] = None
+
+        if not st.session_state.get("current_user"):
+            st.subheader("登录")
+            with st.form("login_form"):
+                identity = st.text_input("用户名或邮箱")
+                password = st.text_input("密码", type="password")
+                submitted = st.form_submit_button("登录", type="primary")
+            if submitted:
+                try:
+                    result = client.login(identity, password)
+                except ApiClientError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["access_token"] = result["access_token"]
+                    st.session_state["current_user"] = result.get("user")
+                    st.rerun()
+            st.caption(
+                "本阶段退出登录只清除浏览器会话中的 Token；"
+                "服务端未实现 jti 撤销表。"
+            )
+            return
+
+        current_user = st.session_state["current_user"]
+        user_column, logout_column = st.columns([5, 1])
+        user_column.caption(
+            f"当前用户：{current_user.get('username')} · "
+            f"{current_user.get('role')}"
+        )
+        if logout_column.button("退出登录", use_container_width=True):
+            client.set_access_token(None)
+            st.session_state["access_token"] = None
+            st.session_state["current_user"] = None
+            st.rerun()
 
     selected_knowledge_base_id, selected_session_id, _ = render_sidebar(
         client=client,

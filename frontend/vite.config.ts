@@ -1,0 +1,48 @@
+import path from 'node:path'
+
+import tailwindcss from '@tailwindcss/vite'
+import vue from '@vitejs/plugin-vue'
+import { defineConfig, loadEnv } from 'vite'
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, import.meta.dirname, '')
+  const apiMode = process.env.VITE_API_MODE ?? env.VITE_API_MODE
+  if (apiMode !== 'mock' && apiMode !== 'real') {
+    throw new Error('VITE_API_MODE must be explicitly set to mock or real')
+  }
+  const runtimeAdapter = path.resolve(
+    import.meta.dirname,
+    apiMode === 'mock'
+      ? './src/api/adapters/mockRuntimeAdapter.ts'
+      : './src/api/adapters/realRuntimeAdapter.ts',
+  )
+  return {
+    plugins: [vue(), tailwindcss()],
+    build: {
+      outDir: apiMode === 'mock' ? 'dist-mock' : 'dist-real',
+      emptyOutDir: false,
+    },
+    resolve: {
+      alias: [
+        {
+          find: '@/api/adapters/runtimeAdapter',
+          replacement: runtimeAdapter,
+        },
+        {
+          find: '@',
+          replacement: path.resolve(import.meta.dirname, './src'),
+        },
+      ],
+    },
+    server: {
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true,
+    },
+    preview: {
+      host: '127.0.0.1',
+      port: 4173,
+      strictPort: true,
+    },
+  }
+})

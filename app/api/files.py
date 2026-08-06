@@ -6,10 +6,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import CurrentUser
 from app.core.config import Settings, get_settings
+from app.core.exceptions import ConflictException, ResourceNotFoundException
 from app.core.response import ApiResponse, success_response
 from app.database.sqlite import get_db
 from app.schemas.file import FileRecordResponse, FileUploadResponse
+from app.schemas.job import JobResponse
+from app.models import FileRecord, Job, JobType, KnowledgeBase, UserRole
+from app.repositories.job_repository import JobRepository
+from app.services.job_service import JobService
 from app.services.file_service import FileService
 from app.services.runtime_coordinator import (
     RuntimeCoordinator,
@@ -25,6 +31,47 @@ RagRuntime = Annotated[
 ]
 
 
+def _owned_knowledge_base(
+    db: Session, knowledge_base_id: str, user: object
+) -> KnowledgeBase:
+    knowledge_base = db.get(KnowledgeBase, knowledge_base_id)
+    if knowledge_base is None or (
+        user.role != UserRole.ADMIN.value
+        and knowledge_base.owner_id != user.id
+    ):
+        raise ResourceNotFoundException("知识库不存在")
+    return knowledge_base
+
+
+def _owned_file(db: Session, file_id: str, user: object) -> FileRecord:
+    record = db.get(FileRecord, file_id)
+    if record is None:
+        raise ResourceNotFoundException("文件不存在")
+    _owned_knowledge_base(db, record.knowledge_base_id, user)
+    return record
+
+
+def _file_response(
+    db: Session,
+    settings: Settings,
+    record: FileRecord,
+) -> FileRecordResponse:
+    knowledge_base = db.get(KnowledgeBase, record.knowledge_base_id)
+    if knowledge_base is None:
+        raise ResourceNotFoundException("知识库不存在")
+    job = (
+        db.get(Job, record.processing_job_id)
+        if record.processing_job_id is not None
+        else None
+    )
+    return FileRecordResponse.from_record(
+        record,
+        settings=settings,
+        knowledge_base=knowledge_base,
+        job=job,
+    )
+
+
 @router.post(
     "/upload",
     response_model=ApiResponse[FileUploadResponse],
@@ -36,12 +83,17 @@ def upload_file(
     db: DatabaseSession,
     settings: AppSettings,
     runtime: RagRuntime,
+    user: CurrentUser,
 ):
     """Persist one validated upload and its PENDING database record."""
-    record = FileService(db, settings, runtime).upload_file(
-        str(knowledge_base_id), file
+    _owned_knowledge_base(db, str(knowledge_base_id), user)
+    with runtime.business_write("upload_file"):
+        record = FileService(db, settings, runtime).upload_file(
+            str(knowledge_base_id), file
+        )
+    data = FileUploadResponse.model_validate(
+        _file_response(db, settings, record).model_dump()
     )
-    data = FileUploadResponse.from_record(record)
     return success_response(data, status_code=status.HTTP_201_CREATED)
 
 
@@ -51,12 +103,14 @@ def list_files(
     db: DatabaseSession,
     settings: AppSettings,
     runtime: RagRuntime,
+    user: CurrentUser,
 ):
     """List the real file records in one knowledge base."""
+    _owned_knowledge_base(db, str(knowledge_base_id), user)
     records = FileService(db, settings, runtime).list_files(
         str(knowledge_base_id)
     )
-    data = [FileRecordResponse.model_validate(item) for item in records]
+    data = [_file_response(db, settings, item) for item in records]
     return success_response(data)
 
 
@@ -66,25 +120,43 @@ def get_file(
     db: DatabaseSession,
     settings: AppSettings,
     runtime: RagRuntime,
+    user: CurrentUser,
 ):
     """Return one real file record."""
+    _owned_file(db, str(file_id), user)
     record = FileService(db, settings, runtime).get_file(str(file_id))
-    return success_response(FileRecordResponse.model_validate(record))
+    return success_response(_file_response(db, settings, record))
 
 
 @router.post(
     "/{file_id}/process",
-    response_model=ApiResponse[FileRecordResponse],
+    response_model=ApiResponse[JobResponse],
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def process_file(
     file_id: UUID,
     db: DatabaseSession,
     settings: AppSettings,
     runtime: RagRuntime,
+    user: CurrentUser,
 ):
-    """Synchronously parse, embed, and index one uploaded file."""
-    record = FileService(db, settings, runtime).process_file(str(file_id))
-    return success_response(FileRecordResponse.model_validate(record))
+    """Queue parsing, embedding, and indexing and return a durable Job."""
+    _ = settings
+    record = _owned_file(db, str(file_id), user)
+    with runtime.admin_operation("submit_file_process"):
+        with runtime.vector_write_lock:
+            job = JobService(db).submit(
+                job_type=JobType.FILE_PROCESS,
+                created_by_id=user.id,
+                resource_type="FILE",
+                resource_id=record.id,
+                resource_name_snapshot=record.original_name,
+                max_attempts=2,
+            )
+    return success_response(
+        JobResponse.model_validate(job),
+        status_code=status.HTTP_202_ACCEPTED,
+    )
 
 
 @router.delete("/{file_id}", response_model=ApiResponse[FileRecordResponse])
@@ -93,7 +165,23 @@ def delete_file(
     db: DatabaseSession,
     settings: AppSettings,
     runtime: RagRuntime,
+    user: CurrentUser,
 ):
     """Safely delete one managed file and its database record."""
-    record = FileService(db, settings, runtime).delete_file(str(file_id))
-    return success_response(FileRecordResponse.model_validate(record))
+    record = _owned_file(db, str(file_id), user)
+    jobs = JobRepository(db)
+    if jobs.has_nonterminal(resource_type="FILE", resource_id=record.id):
+        raise ConflictException("文件仍被非终态 Job 引用")
+    if jobs.has_nonterminal_knowledge_base_job(
+        record.knowledge_base_id
+    ):
+        raise ConflictException("文件所属知识库仍有非终态维护 Job")
+    knowledge_base = db.get(KnowledgeBase, record.knowledge_base_id)
+    if (
+        knowledge_base is not None
+        and knowledge_base.active_collection_name
+        and jobs.collection_is_pinned(knowledge_base.active_collection_name)
+    ):
+        raise ConflictException("文件所属 Collection 正被评估 Job pin")
+    record = FileService(db, settings, runtime).delete_file(record.id)
+    return success_response(_file_response(db, settings, record))

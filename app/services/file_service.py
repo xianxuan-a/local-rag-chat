@@ -19,9 +19,11 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.core.logger import get_logger
+from app.models import Job, JobType
 from app.models.file_record import FileRecord, FileStatus
 from app.models.knowledge_base import KnowledgeBase, RebuildStatus
 from app.repositories.file_repository import FileRepository
+from app.repositories.job_repository import JobRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.services.hash_service import HashService
 from app.services.document_loader import DocumentLoaderService
@@ -54,6 +56,7 @@ class FileService:
         self.settings = settings
         self.runtime = runtime or RuntimeCoordinator(settings)
         self.file_repository = FileRepository(db)
+        self.jobs = JobRepository(db)
         self.knowledge_base_repository = KnowledgeBaseRepository(db)
         self.loader = DocumentLoaderService()
         self.splitter = DocumentSplitterService(settings=settings)
@@ -71,6 +74,13 @@ class FileService:
                 raise ResourceNotFoundException("知识库不存在")
             if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
                 raise ConflictException("知识库正在重建，暂时不能上传文件")
+            if self.jobs.has_nonterminal_knowledge_base_job(
+                knowledge_base.id,
+                job_types=(JobType.KB_REBUILD,),
+            ):
+                raise ConflictException(
+                    "知识库重建 Job 已排队或运行，暂时不能上传文件"
+                )
             return self._upload_file_locked(knowledge_base_id, upload_file)
 
     def _upload_file_locked(
@@ -243,7 +253,13 @@ class FileService:
             self.db.rollback()
             raise
 
-    def process_file(self, file_id: str) -> FileRecord:
+    def process_file(
+        self,
+        file_id: str,
+        *,
+        job_id: str | None = None,
+        checkpoint: object | None = None,
+    ) -> FileRecord:
         """Synchronously parse, split, embed, and replace one file's vectors."""
 
         claimed = False
@@ -254,12 +270,16 @@ class FileService:
                     file_record.knowledge_base_id
                 )
                 self._preflight_file_processing(file_record, knowledge_base)
-                claimed_record = self.file_repository.claim_for_processing(file_id)
+                claimed_record = self.file_repository.claim_for_processing(
+                    file_id, processing_job_id=job_id
+                )
                 if claimed_record is None:
                     self.db.rollback()
                     self._raise_claim_conflict(file_id)
                 self.db.commit()
                 claimed = True
+            if checkpoint is not None:
+                checkpoint("FILE_CLAIMED", 10, force=True)
 
             file_record = self.get_file(file_id)
             file_path = self._resolve_managed_file_path(file_record)
@@ -276,8 +296,18 @@ class FileService:
                 file_type=file_record.file_type,
             )
             chunks = self.splitter.split_documents(source_documents)
+            if checkpoint is not None:
+                checkpoint("FILE_PARSED", 30, force=True)
             config = self.runtime.vector_store.current_config
+            self._record_job_vector_target(
+                job_id,
+                collection_name=None,
+                config_hash=config.config_hash,
+                expected_chunk_count=len(chunks),
+            )
             embeddings = self.runtime.vector_store.embed_documents(chunks, config)
+            if checkpoint is not None:
+                checkpoint("FILE_EMBEDDED", 65, force=True)
 
             self.db.expire_all()
             knowledge_base = self._get_knowledge_base(
@@ -296,6 +326,7 @@ class FileService:
                             file_record,
                             chunks,
                             embeddings,
+                            job_id=job_id,
                         )
                         return self.get_file(file_id)
 
@@ -313,6 +344,16 @@ class FileService:
                 collection_name = knowledge_base.active_collection_name
                 if collection_name is None:
                     raise ConflictException("知识库活动 Collection 尚未建立")
+                self._record_job_vector_target(
+                    job_id,
+                    collection_name=collection_name,
+                    config_hash=config.config_hash,
+                    expected_chunk_count=len(chunks),
+                )
+                if checkpoint is not None:
+                    checkpoint(
+                        "FILE_READY_TO_REPLACE_VECTORS", 75, force=True
+                    )
                 receipt = self.runtime.vector_store.replace_file_documents(
                     collection_name=collection_name,
                     knowledge_base_id=knowledge_base.id,
@@ -321,6 +362,9 @@ class FileService:
                     embeddings=embeddings,
                     config=config,
                     role="active",
+                    processing_job_id=job_id,
+                    vector_run_id=job_id,
+                    expected_chunk_count=len(chunks),
                 )
                 try:
                     self.file_repository.update_active_index(
@@ -337,7 +381,7 @@ class FileService:
             return self.get_file(file_id)
         except Exception as exc:
             if claimed:
-                self._mark_processing_failed(file_id, exc)
+                self._mark_processing_failed(file_id, exc, job_id=job_id)
             raise
 
     def _preflight_file_processing(
@@ -351,6 +395,12 @@ class FileService:
         vector_store = self.runtime.vector_store
         current_hash = vector_store.current_config_hash
         if knowledge_base.active_collection_name:
+            if self.jobs.collection_is_pinned(
+                knowledge_base.active_collection_name
+            ):
+                raise ConflictException(
+                    "活动 Collection 正被评估 Job pin，不能处理文件"
+                )
             if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
                 raise ConflictException("知识库正在重建")
             if knowledge_base.active_collection_name in {
@@ -424,6 +474,8 @@ class FileService:
         file_record: FileRecord,
         chunks: list,
         embeddings: list[list[float]],
+        *,
+        job_id: str | None = None,
     ) -> str:
         config = self.runtime.vector_store.current_config
         self._resolve_initial_building(knowledge_base)
@@ -439,6 +491,14 @@ class FileService:
         knowledge_base.rebuild_status = RebuildStatus.BUILDING
         knowledge_base.rebuild_run_id = run_id
         knowledge_base.building_started_at = datetime.now(timezone.utc)
+        self._record_job_vector_target(
+            job_id,
+            collection_name=collection_name,
+            config_hash=config.config_hash,
+            expected_chunk_count=len(chunks),
+            commit=False,
+            vector_run_id=run_id,
+        )
         self.db.commit()
 
         receipt = None
@@ -458,6 +518,9 @@ class FileService:
                 embeddings=embeddings,
                 config=config,
                 role="building",
+                processing_job_id=job_id,
+                vector_run_id=job_id or run_id,
+                expected_chunk_count=len(chunks),
             )
             self.db.expire_all()
             current_kb = self._get_knowledge_base(knowledge_base.id)
@@ -501,6 +564,32 @@ class FileService:
             )
         return collection_name
 
+    def _record_job_vector_target(
+        self,
+        job_id: str | None,
+        *,
+        collection_name: str | None,
+        config_hash: str,
+        expected_chunk_count: int,
+        commit: bool = True,
+        vector_run_id: str | None = None,
+    ) -> None:
+        if not job_id:
+            return
+        job = self.db.get(Job, job_id)
+        if job is None:
+            raise ConflictException("文件处理 Job 已不存在")
+        if collection_name is not None:
+            job.collection_name = collection_name
+        job.embedding_config_hash = config_hash
+        job.payload = {
+            **dict(job.payload),
+            "expected_chunk_count": expected_chunk_count,
+            "vector_run_id": vector_run_id or job_id,
+        }
+        if commit:
+            self.db.commit()
+
     def _validate_processing_write_state(
         self,
         file_record: FileRecord,
@@ -513,6 +602,15 @@ class FileService:
             raise ConflictException("知识库正在重建")
         if knowledge_base.active_embedding_config_hash != config_hash:
             raise ConflictException("活动 Collection 配置已变化")
+        if (
+            knowledge_base.active_collection_name
+            and self.jobs.collection_is_pinned(
+                knowledge_base.active_collection_name
+            )
+        ):
+            raise ConflictException(
+                "活动 Collection 正被评估 Job pin，不能写入"
+            )
         if knowledge_base.active_collection_name in {
             knowledge_base.previous_collection_name,
             knowledge_base.building_collection_name,
@@ -537,7 +635,9 @@ class FileService:
             raise ConflictException("知识库正在重建")
         raise ConflictException("文件状态不允许处理")
 
-    def _mark_processing_failed(self, file_id: str, exc: Exception) -> None:
+    def _mark_processing_failed(
+        self, file_id: str, exc: Exception, *, job_id: str | None = None
+    ) -> None:
         try:
             self.db.rollback()
             record = self.file_repository.get_by_id(file_id)
@@ -545,6 +645,8 @@ class FileService:
                 return
             record.status = FileStatus.FAILED
             record.error_message = self._safe_error_message(exc)
+            if job_id is None or record.processing_job_id == job_id:
+                record.processing_job_id = None
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -653,6 +755,11 @@ class FileService:
             ]
             if len(referenced_names) != len(set(referenced_names)):
                 raise ConflictException("知识库 Collection 指针存在重复引用")
+            for name in referenced_names:
+                if self.jobs.collection_is_pinned(name):
+                    raise ConflictException(
+                        "文件所在 Collection 正被评估 Job pin，不能删除"
+                    )
             for name, config_hash, role in collection_roles:
                 if not name or name in collection_names:
                     continue

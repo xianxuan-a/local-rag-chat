@@ -75,7 +75,9 @@ class FileRepository:
         self.db.refresh(file_record)
         return file_record
 
-    def claim_for_processing(self, file_id: str) -> FileRecord | None:
+    def claim_for_processing(
+        self, file_id: str, *, processing_job_id: str | None = None
+    ) -> FileRecord | None:
         """Atomically claim one eligible file while its KB is not rebuilding."""
 
         knowledge_base_available = exists(
@@ -97,7 +99,11 @@ class FileRepository:
                 ),
                 knowledge_base_available,
             )
-            .values(status=FileStatus.PROCESSING, error_message=None)
+            .values(
+                status=FileStatus.PROCESSING,
+                error_message=None,
+                processing_job_id=processing_job_id,
+            )
             .execution_options(synchronize_session=False)
         )
         result = self.db.execute(statement)
@@ -127,6 +133,7 @@ class FileRepository:
         if update_task_status:
             file_record.status = FileStatus.SUCCESS
             file_record.error_message = None
+            file_record.processing_job_id = None
         file_record.chunk_count = chunk_count
         file_record.has_active_vectors = chunk_count > 0
         file_record.active_index_config_hash = (

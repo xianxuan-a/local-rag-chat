@@ -72,6 +72,35 @@ def test_management_methods_use_central_http_client(monkeypatch) -> None:
     assert calls[1]["timeout"] == 30
 
 
+def test_unauthorized_response_clears_token_and_notifies_ui(
+    monkeypatch,
+) -> None:
+    notifications: list[str] = []
+    response = FakeResponse(
+        status_code=401,
+        payload={
+            "code": 401,
+            "message": "用户已禁用",
+            "data": None,
+        },
+    )
+    monkeypatch.setattr(
+        "ui.api_client.requests.request",
+        lambda **_kwargs: response,
+    )
+    client = ApiClient(
+        "http://backend.test",
+        access_token="expired-token",
+        on_auth_failure=lambda: notifications.append("cleared"),
+    )
+
+    with pytest.raises(ApiClientError, match="用户已禁用.*401"):
+        client.me()
+
+    assert client.access_token is None
+    assert notifications == ["cleared"]
+
+
 def test_stream_chat_parses_structured_events_and_closes(monkeypatch) -> None:
     response = FakeResponse(
         events=[

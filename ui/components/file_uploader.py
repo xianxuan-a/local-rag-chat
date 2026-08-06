@@ -125,7 +125,7 @@ def render_file_uploader(
     processing_file_ids = set(
         st.session_state.get("processing_file_ids", [])
     )
-    st.caption("处理接口为同步调用；页面只展示后端持久化状态，不模拟百分比。")
+    st.caption("处理接口返回持久化 Job；页面轮询真实阶段和最终状态。")
     for record in file_records:
         file_id = str(record.get("id") or "")
         display_name = str(record.get("original_name") or file_id or "未命名文件")
@@ -208,10 +208,14 @@ def render_file_uploader(
                         status_box.write(
                             "等待后端完成解析、切分、Embedding 和向量写入。"
                         )
-                        result = client.process_file(file_id)
-                        process_succeeded = True
-                        final_status = str(result.get("status") or "")
-                        if final_status == "SUCCESS":
+                        submitted = client.process_file(file_id)
+                        job_id = str(submitted.get("id") or "")
+                        status_box.write(f"Job 已提交：{job_id}")
+                        job = client.wait_for_job(job_id)
+                        process_succeeded = job.get("status") == "SUCCEEDED"
+                        result = job.get("result") or {}
+                        final_status = str(job.get("status") or "")
+                        if final_status == "SUCCEEDED":
                             status_box.update(
                                 label=(
                                     f"处理成功，共生成 "

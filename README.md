@@ -1,19 +1,18 @@
 # Local RAG Chat
 
-Local RAG Chat 是一个单机知识库服务。当前版本已经实现文件管理、文档解析与切分、DashScope Embedding、Chroma 持久化、版本化重建、回滚、相似度检索、会话历史，以及同步和流式 RAG 问答。
+Local RAG Chat 是单机、单实例的本地知识库服务，包含认证与所有权、文件索引、版本化 Chroma Collection、会话历史、同步/流式 RAG、持久化 Job、固定 Collection 评估、在线逻辑备份及安全离线恢复。
 
-## 运行约束
+## 不可突破的运行边界
 
-索引存储采用本地 SQLite 和 `chromadb.PersistentClient`。当前版本只支持：
+- FastAPI 与 Job worker 在同一进程运行，业务 worker 只有一个线程。
+- Uvicorn 必须使用 `--workers 1`；进程启动会取得 `data/.instance.lock`，第二个实例立即失败。
+- SQLite 使用 `WAL`、`foreign_keys=ON`、`busy_timeout=5000`、`synchronous=FULL`。
+- 应用启动只校验 Alembic revision 等于 head，不会 `create_all`、运行 `ALTER TABLE` 或自动迁移。
+- 应用、迁移和 bootstrap 都不会创建或修改 `.env`。只有用户显式运行的 `scripts/init_secrets.py` 可以写指定 env 文件。
+- SQLite、Chroma 和上传目录不构成分布式事务。SQLite Backup API 只保证 SQLite 快照本身一致。
+- 在线备份只经 Chroma API 逻辑导出，不复制正在运行的 Chroma 目录。Chroma 物理目录只允许在 API 已停止并取得实例锁后备份。
 
-- 单机、单个 FastAPI 进程。
-- `uvicorn --workers 1`。
-- 只有 FastAPI 服务直接访问 SQLite、上传目录和 Chroma 目录。
-- `scripts/rebuild_kb.py` 只通过 HTTP 调用服务，不直接打开数据库或 Chroma。
-
-不要让多个 worker 或多个服务实例同时访问同一个本地 Chroma 目录。需要横向扩展时，应部署独立 Chroma Server 并将业务层切换到 `chromadb.HttpClient`。
-
-## 安装与启动
+## 新环境初始化
 
 需要 Python 3.11 或更高版本。
 
@@ -22,112 +21,315 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 Copy-Item .env.example .env
+python scripts/init_secrets.py --env-file .env
+alembic upgrade head
 ```
 
-在 `.env` 中配置 `DASHSCOPE_API_KEY` 和聊天模型。`qwen3-max` 仅为示例，程序不会为 `CHAT_MODEL` 提供业务默认值：
+### Windows 本地启动
 
-```dotenv
-DASHSCOPE_API_KEY="..."
-CHAT_MODEL="qwen3-max"
-CHAT_TEMPERATURE=0.1
-CHAT_MAX_TOKENS=1024
-CHAT_TIMEOUT_SECONDS=60
-CHAT_MAX_ATTEMPTS=2
-RAG_CONTEXT_MAX_CHARS=12000
+双击 `启动项目.cmd` 会读取本机 `.local-rag-chat.json` 中固定的数据目录。
+启动器不会猜测、回退或自动切换到项目 `data` 目录。固定运行目录还必须包含
+匹配的 `.local-rag-runtime.json` 身份文件；配置缺失或身份不一致时拒绝启动，
+避免代码升级后误连另一套空库。
 
-EMBEDDING_PROVIDER="dashscope"
-EMBEDDING_MODEL="text-embedding-v4"
-EMBEDDING_DIMENSION=1024
-EMBEDDING_NORMALIZATION="l2"
-EMBEDDING_PROTOCOL_VERSION="dashscope-text-embedding-v1"
-VECTOR_DISTANCE_METRIC="cosine"
+启动器会检查 SQLite Schema 版本；版本落后时显示迁移范围并等待确认。确认后，
+先在固定运行目录的 `backups/startup-migrations` 保留独立数据库备份，再迁移
+数据库副本并原子切换；迁移失败不会替换原数据库。
+
+需要使用其他本地运行目录时，可通过参数指定：
+
+```powershell
+.\启动项目.cmd -RuntimeRoot D:\local-rag-runtime
 ```
 
-启动服务：
+也可设置 `LOCAL_RAG_RUNTIME_ROOT` 或直接设置 `LOCAL_RAG_DATABASE`，显式参数
+优先于本机固定配置。自动化的
+本地环境可传入 `-AutoUpgrade` 跳过确认；生产环境仍应遵循下文的备份、恢复
+演练和停机切换流程，不应使用本地启动器自动升级。
+
+在 `.env` 中显式配置 `DASHSCOPE_API_KEY`、`CHAT_MODEL` 及 Embedding 参数。生产环境缺少 `JWT_SECRET`、`METRICS_SCRAPE_TOKEN`、`BACKUP_SIGNING_KEY` 或 `BOOTSTRAP_SECRET` 时会快速失败。
+
+API 停止时可离线初始化 bootstrap admin，密码从环境变量读取或安全交互输入，不出现在命令行参数中：
+
+```powershell
+$env:BOOTSTRAP_ADMIN_PASSWORD="<12–72 UTF-8 bytes>"
+python scripts/bootstrap_admin.py --username admin --email admin@example.com
+Remove-Item Env:BOOTSTRAP_ADMIN_PASSWORD
+```
+
+也可在首次启动后调用一次 `POST /api/auth/bootstrap`，并提供 `X-Bootstrap-Secret`。成功后该入口拒绝重复初始化。
 
 ```powershell
 python run.py
-```
-
-Swagger 位于 `http://localhost:8000/docs`。可选前端：
-
-```powershell
 streamlit run ui/streamlit_app.py
 ```
 
-Streamlit 必须从项目根目录启动。页面只通过 FastAPI HTTP 接口访问数据，支持文件上传、同步处理、状态查看、删除、会话切换、历史恢复和真实流式回答。普通请求超时由 `API_TIMEOUT_SECONDS` 配置，文件处理和流式读取超时由 `API_STREAM_TIMEOUT_SECONDS` 配置。
+Swagger 位于 `http://localhost:8000/docs`。Streamlit 只通过 HTTP 访问后端。
 
-## 文件与索引接口
+## Vue 前端与 Real/Mock 边界
 
-所有接口使用 `{code, message, data}` 响应包装。
+Vue 前端位于 `frontend`。API 模式必须显式选择，Real 请求失败不会回退
+Mock，也不会在前端伪造持久化、Job 进度或流式回答。
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev:real   # VITE_API_MODE=real，默认连接 http://127.0.0.1:8000
+npm run dev:mock   # VITE_API_MODE=mock，仅使用隔离的内存 Mock Service
+```
+
+生产构建同样显式区分：
+
+```powershell
+npm run build:real
+npm run build:mock
+```
+
+Real 配置见 `frontend/.env.real`，Mock 配置见
+`frontend/.env.mock`。两种模式不共享浏览器持久化状态，Mock 不注册网络
+拦截器。构建产物分别写入 `frontend/dist-real` 和
+`frontend/dist-mock`，构建过程不会批量清理已有目录。
+
+## P1 Dashboard
+
+`GET /api/dashboard` 返回当前登录用户可见范围内的真实聚合，可选
+`knowledge_base_id`、`window_days`（1–30）和 `recent_limit`（1–20）。
+指标、文件状态、连续日期趋势、最近文件/会话/索引 Job/评测 Job 均由
+SQLite 在后端聚合；时间窗口按 UTC 自然日计算。管理员沿用全局可见语义，
+普通用户仅能看到自己的知识库和运行。响应只返回 Chat/Embedding 是否已配置，
+不返回 Secret 内容。
+
+Dashboard 的核心指标查询失败会返回明确错误；非核心最近记录或趋势查询单独失败
+时，响应通过 `section_errors` 标记对应区域，前端展示“部分数据暂时不可用”，
+不会用 Mock 数据补齐。
+
+## 现有真实数据库迁移
+
+所有开发、baseline、downgrade/upgrade 和数据检查必须针对副本。真实数据库只在最终停机窗口切换。
+
+```powershell
+# 1. 停止 API 后生成无新 Schema 依赖的离线物理备份
+python scripts/pre_migration_backup.py `
+  --output D:\backups\pre-migration-20260726.zip
+
+# 2. 在一个全新目录完成恢复演练
+python scripts/restore_pre_migration_backup.py `
+  --archive D:\backups\pre-migration-20260726.zip `
+  --target D:\restore-drills\pre-migration-20260726
+
+# 3. 可先迁移任意副本并检查报告
+python scripts/migrate_database.py copy-upgrade `
+  --source data\metadata\local_rag_chat.db `
+  --target D:\migration-tests\candidate.db
+
+# 4. 仅在最终停机窗口切换真实数据库
+python scripts/migrate_database.py final-cutover `
+  --database data\metadata\local_rag_chat.db `
+  --pre-migration-backup D:\backups\pre-migration-20260726.zip `
+  --restore-drill D:\restore-drills\pre-migration-20260726
+```
+
+`copy-upgrade` 会规范化比较列、类型亲和性与长度、nullable、server default、主键顺序、外键及 `ondelete`、唯一/检查约束、索引列和 partial 条件，随后检查完整性、外键和历史表行数。`final-cutover` 还会校验恢复演练 marker 确实对应所选备份，并比较当前数据库与备份内 SQLite 逻辑指纹；停机备份之后只要数据库发生变化就拒绝切换。切换成功后保留原数据库文件。
+
+当前 Alembic head 为 `0007_retrieval_modes`。`alembic downgrade -1`
+只用于临时测试库。若不同所有者已存在同名知识库，`0002` 会明确拒绝
+downgrade。应用不会迁移真实数据库；升级仍需用户在停机窗口显式执行。
+
+## 认证边界
+
+- 本地开发默认 `AUTH_REQUIRED=false`，前端不提供登录页，所有请求以迁移内置的本地单用户管理员身份执行。
+- 生产环境强制要求 `AUTH_REQUIRED=true`；关闭认证会在配置校验阶段直接拒绝启动。
+- 用户名和邮箱保留展示值，同时以 `NFKC + casefold` 保存规范化值并唯一约束；登录使用相同规则。
+- 密码必须是 12–72 个 UTF-8 字节，超出 bcrypt 72 字节上限会在哈希前拒绝。
+- JWT 只以 `sub` 定位用户。每个请求都从数据库重新读取 `is_active` 和 `role`，不信任 token 中的旧权限。
+- `jti` 只用于追踪，本版本没有撤销表。退出登录只是客户端删除 token；已经签发的 token 不会被服务端撤销。
+- 用户注册由 `ALLOW_REGISTRATION` 显式控制；Compose 生产默认关闭。
+- `/metrics` 不接受管理员 JWT 代替鉴权，必须提供独立长期请求头 `X-Metrics-Scrape-Token`。
+
+主要认证接口：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/knowledge-bases` | 创建知识库 |
-| GET | `/api/knowledge-bases` | 列出知识库 |
-| DELETE | `/api/knowledge-bases/{id}` | 删除空知识库及其明确跟踪的 Collection |
-| POST | `/api/files/upload` | 上传文件并快速返回 `PENDING` |
+| POST | `/api/auth/register` | 注册普通用户 |
+| POST | `/api/auth/login` | 获取 Bearer JWT |
+| GET | `/api/auth/me` | 返回数据库中的实时用户状态与角色 |
+| POST | `/api/auth/bootstrap` | 使用 bootstrap Secret 初始化一次管理员 |
+| GET | `/metrics` | 使用独立 scrape token 抓取 Prometheus 指标 |
+
+## 日志、健康检查与监控
+
+- 控制台和 UTF-8 文件日志共用一套配置；`app.log` 按 `LOG_MAX_BYTES` 轮转并最多保留 `LOG_BACKUP_COUNT` 份。
+- 统一请求中间件生成或校验 UUID `request_id`，响应返回 `X-Request-ID`，日志只记录 request/user ID、Method、路由模板、状态和耗时，不记录认证头、正文、问题或回答。
+- `GET /health/live` 只判断进程存活；`GET /health/ready` 检查 SQLite、必要目录、Chroma heartbeat 和 Job worker，不调用 Embedding 或 Generation。`GET /health` 仅为旧客户端保留的 live 别名。
+- `/metrics` 提供低基数的 HTTP 数量/错误/延迟、Job 终态/耗时、文件处理结果、Embedding/Generation 错误、检索耗时和 RAG 耗时指标。
+
+## 持久化 Job
+
+文件处理、知识库重建、retired cleanup、评估和在线备份均由 SQLite Job 执行。提交接口返回 `202`，客户端通过 `/api/jobs/{id}` 查询。
+
+Job 使用 `run_after`、`lease_owner`、`lease_expires_at` 和 `retry_of_job_id`。抢占是条件 `UPDATE … RETURNING`，没有使用 SQLite 不支持的 `SKIP LOCKED`。业务调用不持有数据库写事务；独立心跳在线程阻塞于模型或 IO 时也会续租，进度写入至少间隔 1 秒。
+
+| Job 类型 | 租约过期后的恢复 |
+| --- | --- |
+| `FILE_PROCESS` | 只恢复本 Job 拥有的 `PROCESSING`；核对目标、配置、分块数和向量 run 元数据。完整则补成功，部分写入则清除本 run 并完整 replace，不可验证则要求整库重建。 |
+| `KB_REBUILD` | 校验 rebuild run、源指针、候选内每个文件的声明分块数和向量所有权。完整候选可继续切换，已切换则补成功，不完整候选标记失败后从头重建，指针变化则人工处理。 |
+| `KB_CLEANUP_RETIRED` | 重新检查 cleanup 指针、Collection 是否存在以及评估 pin；无 pin 才幂等删除。 |
+| `RAG_EVALUATION` | 报告已原子落盘但数据库尚未登记时，会校验路径、身份字段和完整结构并补记哈希后成功；否则从案例 0 写新 attempt。已预留预算不返还，剩余预算不足则失败。 |
+| `BACKUP` | 永不自动续跑或自动 retry；清除 draining 并隔离单个 `.partial`。管理员手工 retry 会创建新的归档目标。 |
+
+只有恢复器返回可重试后 Job 才会重新排队。文件、重建、cleanup 和评估 Job 最多执行两次；第二次仍需重跑时进入失败终态并要求手工 retry，等待评估 pin 不消耗该次数。取消在安全 checkpoint 生效；最终文件向量提交、Collection 指针切换或归档原子改名已经完成时，实际提交结果胜出。
+
+Job 接口：
+
+| 方法 | 路径 |
+| --- | --- |
+| GET | `/api/jobs` |
+| GET | `/api/jobs/{id}` |
+| POST | `/api/jobs/{id}/cancel` |
+| POST | `/api/jobs/{id}/retry` |
+
+## 操作冲突
+
+- 同一文件处理去重；活动 Collection 被评估 pin 时拒绝文件处理。
+- 同一知识库的文件维护、rebuild、rollback、abort、cleanup 和删除按资源状态与非终态 Job 互斥。
+- 评估固定提交时的 Collection 和配置；rebuild 可以构建新候选，但不能清理被 pin 的旧 Collection。
+- rollback 若会把 pinned Collection 变为写入目标则拒绝。
+- File/KB 删除会检查所有引用资源的非终态 Job、Collection pin 及 `PROCESSING/BUILDING`。
+- BACKUP 提交要求没有其他非终态 Job；提交请求先进入 writer-preferring 独占门闩，阻止新共享写并等待已有共享操作退出，再在同一临界区持久化 `BACKUP_DRAINING` 和 Job。
+- 备份期间只读 GET 可继续；上传、注册、会话、聊天和同步维护写入被拒绝。心跳是控制面写入，可绕过业务屏障。
+- 对应知识库进入 `BUILDING` 后，新上传、会话写入和聊天历史写入会被拒绝；已经固定旧 Collection 的评估可继续。
+
+## 文件、重建与聊天接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST/GET | `/api/knowledge-bases` | 创建/列出当前所有者知识库 |
+| GET/PATCH/DELETE | `/api/knowledge-bases/{id}` | 查询、更新名称/描述或安全删除 |
+| POST | `/api/files/upload` | 上传并返回 `PENDING` |
 | GET | `/api/files?knowledge_base_id=...` | 查询文件 |
-| POST | `/api/files/{id}/process` | 同步解析、切分、向量化并入库 |
-| DELETE | `/api/files/{id}` | 删除文件、磁盘内容和各版本向量 |
-| POST | `/api/sessions` | 创建知识库会话 |
-| GET | `/api/sessions?knowledge_base_id=...` | 查询知识库会话 |
-| GET | `/api/sessions/{id}/messages?knowledge_base_id=...` | 按顺序查询历史消息 |
-| DELETE | `/api/sessions/{id}?knowledge_base_id=...` | 删除会话及关联消息 |
-| POST | `/api/knowledge-bases/{id}/rebuild` | 构建新 generation 并原子切换 |
-| POST | `/api/knowledge-bases/{id}/rollback` | 交换 active/previous 指针 |
-| POST | `/api/knowledge-bases/{id}/abort-building` | 清理遗留候选 |
-| POST | `/api/knowledge-bases/{id}/cleanup-retired` | 精确清理 cleanup 指针 |
-| POST | `/api/chat` | 同步检索完整分块并生成带来源的回答 |
-| POST | `/api/chat/stream` | 以结构化 NDJSON 流式生成回答 |
+| POST | `/api/files/{id}/process` | 返回 `202 FILE_PROCESS` Job |
+| DELETE | `/api/files/{id}` | 安全删除文件与引用向量 |
+| GET/PUT | `/api/settings` | 读取有效配置；管理员持久化安全业务配置 |
+| POST | `/api/retrieval` | 基于活动 Collection 和 query embedding 执行独立检索 |
+| POST | `/api/knowledge-bases/{id}/rebuild` | 返回 `202 KB_REBUILD` Job |
+| POST | `/api/knowledge-bases/{id}/rollback` | 原子交换 active/previous |
+| POST | `/api/knowledge-bases/{id}/abort-building` | 清理无人引用的失败候选 |
+| POST | `/api/knowledge-bases/{id}/cleanup-retired` | 返回 `202 cleanup` Job |
+| POST | `/api/chat` | 同步 RAG 与原子历史写入 |
+| POST | `/api/chat/stream` | NDJSON 真流式 RAG；完成、失败和取消均持久化 |
+| POST | `/api/chat/messages/{id}/retry/stream` | 原位重试已有助手回答 |
+| POST | `/api/chat/messages/{id}/cancel` | 对精确消息发出协作式停止信号 |
+| POST/GET/DELETE | `/api/sessions...` | 会话历史管理 |
 
-上传不会自动触发向量化。调用 `/process` 后，文件会从 `PENDING`、`FAILED` 或 `SUCCESS` 原子抢占为 `PROCESSING`，成功后进入 `SUCCESS`。配置冲突和 Collection 一致性错误在抢占前返回 409。
+Collection 创建/读取始终使用 `embedding_function=None`，写入使用预计算 embedding，查询只传 `query_embeddings`。数据库 active 指针是普通检索路由的权威来源；模型、维度、归一化、距离度量或协议变化后必须整库重建。
 
-## Collection 与检索约定
+`product_settings` 持久化 Chat 模型、默认检索数量、分数阈值、RAG 上下文字符预算、全局联网开关、默认检索模式、最小证据数和时效词。API Key、Embedding 空间和基础设施参数仍只来自环境变量；Settings API 仅返回 Provider/密钥是否已配置，不返回任何密钥内容。
 
-- 每个 Collection 显式使用 `configuration={"hnsw": {"space": "cosine"}}`。
-- 创建和读取均显式使用 `embedding_function=None`。
-- 所有写入传入预计算 `embeddings`；所有查询只传 `query_embeddings`。
-- 数据库中的 active 指针是查询路由的权威来源。
-- 向量空间哈希包含 provider、model、dimension、normalization、distance metric 和协议版本。
-- 模型、维度、归一化、距离度量或协议变化后，必须执行整库重建。
+## 三种检索模式
 
-业务检索由 `RetrievalService` 提供，分数为原始余弦相似度 `1 - cosine_distance`，范围为 `[-1, 1]`，默认不设置阈值。
+- `knowledge_only` 仅调用活动 Collection，本地引用使用 `[Kx]`，联网 Provider 调用次数为零。
+- `knowledge_first` 先执行本地检索，再按“异常、无结果、时效词、现有阈值、证据数量、确定性实体覆盖”的固定顺序决定是否联网。
+- `hybrid` 在统一时间预算内并行执行本地与联网分支；单侧成功可降级，双侧没有可靠证据时不调用生成模型。
 
-## RAG 问答约定
+在线模式依次受全局开关、用户角色和知识库 `web_access_policy` 约束；知识库的 `allow` 不能绕过上层禁令。网页引用使用 `[Wx]`。当前仓库默认安装显式的 `disabled` Provider，因此未接入指定供应商前会返回 `not_configured`，不会伪造搜索结果或回退 Mock。
 
-- 模型上下文使用 RetrievalService 返回的完整分块正文；`content_preview` 只用于响应中的来源展示。
-- 文件名、问题和来源正文以 JSON 结构传给模型，明确标记知识库来源为不可信数据，以降低提示注入风险，但不宣称能够完全阻止提示注入。
-- `RAG_CONTEXT_MAX_CHARS` 是最终来源 JSON 的 Python 字符数预算，不等同于 token 数。
-- 聊天客户端仅在检索得到有效上下文后创建；无结果时不校验聊天模型配置，也不会请求 DashScope。
-- `CHAT_MAX_ATTEMPTS=2` 是一次问答的全局模型请求上限。临时错误重试和上下文缩减重试共用该上限。
-- `/api/chat` 保持同步兼容；`/api/chat/stream` 使用 DashScope 的真实增量输出并返回 `application/x-ndjson`。
-- 流事件依次为 `start`、一个或多个 `delta`、`sources` 和 `done`；流内失败返回结构化 `error` 事件。
-- 流式回答完整结束并通过引用校验后，用户消息和一条完整助手消息才会在同一数据库事务中保存；中断或失败不会保存部分助手回答。
-- 模型回答中的合法 `[S1]` 引用会映射为公开 `SourceReference`；非法或越界编号不会生成来源。
+联网查询只使用当前问题，经 NFKC 规范化、隐私脱敏和长度校验后交给 Provider；日志仅记录脱敏查询的 SHA-256 摘要。抓取器逐跳校验重定向与域名，拒绝私网/环回地址、非文本内容和超限响应。知识库与网页正文都按不可信数据处理，高风险提示注入段不会进入生成上下文。
 
-## 重建 CLI
+## 固定 Collection 评估
 
-CLI 只发送 HTTP 请求：
+`POST /api/evaluations` 接受 multipart JSONL，提交时固定 `knowledge_base_id`、`collection_name`、Embedding 配置哈希、数据集 SHA-256、`top_k` 和 threshold。评估直接调用纯检索与生成服务，不创建 Session 或 Message。
 
-```powershell
-python scripts/rebuild_kb.py --knowledge-base-id <uuid>
-python scripts/rebuild_kb.py --knowledge-base-id <uuid> --rollback-to-previous
-python scripts/rebuild_kb.py --knowledge-base-id <uuid> --abort-building
-python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired
-```
+资源上限：
 
-可通过 `--api-base-url` 和 `--timeout-seconds` 覆盖默认值。
+- 文件 5 MiB，最多 100 个案例，单行 64 KiB。
+- `question` 最多 4000 字符。
+- `expected_answer` 为 1–20 个答案点，每项最多 500 字符。
+- source ID 最多 100 个；tag 最多 20 个且每项最多 64 字符。
+- 每案例最多一次检索 Embedding 和一次 Generation。
+- 提交时必须给出足够的总调用数、生成 token 和运行时间预算；调用前原子预留，崩溃后不重复使用已预留预算。
 
-## 测试
+报告先写 attempt 临时文件，再用 `os.replace` 原子覆盖。每个案例的错误独立记录。
+机器报告同时给出 Hit@K、Recall@K、MRR、平均检索耗时、回答成功率、答案要点召回、引用格式合法率、引用越界率、引用来源命中率、平均生成/端到端耗时和失败类型分布；未提供预期 source ID 的案例不会被伪计入检索正确率分母。
+成功后可通过 `GET /api/evaluations/{job_id}/report` 获取经过路径、大小和 SHA-256 校验的报告。
 
 ```powershell
-pytest
-python -m compileall app scripts
+python scripts/evaluate_rag.py `
+  --knowledge-base-id <uuid> `
+  --dataset dataset.jsonl `
+  --token <jwt> `
+  --report-output evaluation-report.json
 ```
 
-普通测试使用无网络 FakeEmbedding。真实 DashScope 冒烟测试应默认跳过，只有显式启用并提供 API Key 时才运行。
+## 在线逻辑备份与离线恢复
 
-## 一致性边界
+管理员调用 `POST /api/backups` 或 HTTP-only CLI：
 
-SQLite 与 Chroma 不具备跨系统原子事务。服务通过完整向量快照、写入校验、失败补偿、版本化 Collection 和数据库指针降低风险，但强制终止进程仍可能留下 `PROCESSING`、`BUILDING` 或活动 Collection 的混合状态。此时应先检查状态，再使用 abort、cleanup 或整库重建修复。
+```powershell
+python scripts/backup.py submit --token <jwt>
+```
+
+BACKUP 在独占写屏障中执行 SQLite Backup API 快照，并将快照内所有非终态 Job 改为恢复失败；其中 BACKUP 使用 `RESTORED_BACKUP_NOT_RESUMED`。它通过 Chroma API 分批导出 active/previous/cleanup 指针引用的 Collection，保存配置、元数据、ID、文档、embedding 和 metadata，同时归档上传文件、评估文件及安全配置摘要。
+
+Manifest 对每个成员记录 SHA-256，并用独立 `BACKUP_SIGNING_KEY` 对规范化 JSON 做 HMAC-SHA256。哈希证明完整性，HMAC 验证备份来源；它们不把多存储系统变成共同事务。
+
+恢复只能在 API 停止后写入一个不存在的新目录：
+
+```powershell
+python scripts/restore_backup.py `
+  --archive data\backups\online-logical-....zip `
+  --target D:\restores\local-rag-restored
+```
+
+恢复不使用 `extractall`，会拒绝重复成员、Unicode/Windows 大小写冲突、绝对路径、盘符、UNC、`..`、NUL、symlink、非普通文件、超额成员/单文件/总大小/压缩比、无效 HMAC、无效 Manifest 和成员哈希。逐成员流式写入并持续校验 staging 边界。验证数据库指针、Collection 配置与数量后才原子改名；失败 staging 保留供人工检查。
+
+备份保留策略默认只 dry-run 列出过期归档；实际清理每次必须用 `scripts/backup.py` 明确删除一个文件，不提供批量删除。
+
+## HTTP-only 运维 CLI
+
+```powershell
+python scripts/rebuild_kb.py --knowledge-base-id <uuid> --token <jwt>
+python scripts/rebuild_kb.py --knowledge-base-id <uuid> --rollback-to-previous --token <jwt>
+python scripts/rebuild_kb.py --knowledge-base-id <uuid> --abort-building --token <jwt>
+python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --token <jwt>
+```
+
+`rebuild_kb.py`、`evaluate_rag.py` 和在线 `backup.py` 不直接打开 SQLite 或 Chroma。
+
+## Docker
+
+Compose 固定 backend `workers=1`，生产 Secret 使用 `${NAME:?required}` 快速失败。先初始化 Secret，再显式运行迁移工具 profile，最后启动：
+
+```powershell
+docker compose build
+docker compose --profile tools run --rm migrate
+docker compose up -d
+```
+
+停止时使用 `docker compose down`。不要附加 `-v`，否则会删除持久卷。
+
+## 验证
+
+```powershell
+pytest -q
+python -m compileall app scripts ui tests
+Set-Location frontend
+npm run type-check
+npm run lint
+npm run lint:colors
+npm run test:unit
+npm run build:real
+npm run build:mock
+npm run test:e2e
+```
+
+普通测试不访问网络，真实 DashScope 测试默认跳过。Docker daemon、真实 `qwen3-max` 链路、容器重启持久化、在线备份和离线临时恢复需在具备对应环境与 Secret 后单独验收。
+
+服务重启时会重新加载持久化 Settings，将遗留流式消息标记为失败，并由
+持久化 Job 恢复器处理可验证的文件、索引和评测运行；前端页面刷新只恢复服务器
+状态，不会续接旧浏览器请求。跨进程续流、分布式 Worker 和水平扩展不在 P1
+支持范围内。
+
+参考边界：[Chroma backup guidance](https://cookbook.chromadb.dev/strategies/backup/)、[SQLite Backup API](https://www.sqlite.org/backup.html)、[Alembic SQLite batch migration](https://alembic.sqlalchemy.org/en/latest/batch.html)、[Python ZIP security guidance](https://docs.python.org/3.13/library/zipfile.html)。
+
+P1 四轮实现与本次实测结果见
+[`docs/p1-closeout-report.md`](docs/p1-closeout-report.md)。

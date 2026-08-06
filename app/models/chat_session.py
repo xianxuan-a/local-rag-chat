@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -18,6 +18,14 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A conversation associated with exactly one knowledge base."""
 
     __tablename__ = "chat_sessions"
+    __table_args__ = (
+        Index(
+            "ix_chat_sessions_kb_updated",
+            "knowledge_base_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     knowledge_base_id: Mapped[str] = mapped_column(
         String(36),

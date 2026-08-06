@@ -115,15 +115,14 @@ def test_session_crud_filters_by_knowledge_base_and_deletes_messages(
             "top_k": 4,
         },
     )
-    assert chat.status_code == 200
-    assert chat.json()["data"]["session_id"] == first_session["id"]
+    assert chat.status_code == 409
 
     history = _messages(client, first_kb_id, first_session["id"])
     assert history.status_code == 200
     messages = history.json()["data"]
     assert [item["role"] for item in messages] == ["user", "assistant"]
     assert messages[0]["content"] == "没有索引时会怎样？"
-    assert "未检索到足够信息" in messages[1]["content"]
+    assert messages[1]["status"] == "failed"
     assert all(item["session_id"] == first_session["id"] for item in messages)
 
     other_history = _messages(
@@ -200,8 +199,13 @@ def test_chat_without_session_creates_and_persists_one(
         },
     )
 
-    assert response.status_code == 200
-    session_id = response.json()["data"]["session_id"]
+    assert response.status_code == 409
+    sessions = client.get(
+        "/api/sessions",
+        params={"knowledge_base_id": knowledge_base_id},
+    ).json()["data"]
+    assert len(sessions) == 1
+    session_id = sessions[0]["id"]
     detail = client.get(
         f"/api/sessions/{session_id}",
         params={"knowledge_base_id": knowledge_base_id},
@@ -240,7 +244,7 @@ def test_chat_activity_updates_default_title_and_session_order(
             "top_k": 4,
         },
     )
-    assert response.status_code == 200
+    assert response.status_code == 409
 
     updated = client.get(
         "/api/sessions",
@@ -253,7 +257,7 @@ def test_chat_activity_updates_default_title_and_session_order(
     assert updated.json()["data"][0]["title"] == "第一次问题会成为标题"
 
 
-def test_model_failure_saves_neither_message(
+def test_model_failure_persists_user_and_failed_assistant(
     client: TestClient,
     monkeypatch,
 ) -> None:
@@ -264,6 +268,10 @@ def test_model_failure_saves_neither_message(
         raise ModelServiceException("模型失败", status_code=502)
 
     monkeypatch.setattr("app.api.chat.RagService.ask", fail_generation)
+    monkeypatch.setattr(
+        "app.api.chat.RagService.prepare_retrieval",
+        lambda *_args, **_kwargs: None,
+    )
     response = client.post(
         "/api/chat",
         json={
@@ -275,11 +283,15 @@ def test_model_failure_saves_neither_message(
     )
 
     assert response.status_code == 502
-    assert _messages(
+    messages = _messages(
         client,
         knowledge_base_id,
         chat_session["id"],
-    ).json()["data"] == []
+    ).json()["data"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "不会被保存"
+    assert messages[1]["status"] == "failed"
+    assert messages[1]["error_code"] == "CHAT_REQUEST_FAILED"
 
 
 def test_second_message_failure_rolls_back_user_message(
@@ -336,7 +348,7 @@ def test_delete_failure_rolls_back_message_deletion(
             "top_k": 4,
         },
     )
-    assert chat.status_code == 200
+    assert chat.status_code == 409
 
     def fail_session_delete(*_args, **_kwargs):
         raise RuntimeError("session delete failed")

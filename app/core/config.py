@@ -14,6 +14,8 @@ from typing import ClassVar
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.retrieval_modes import DEFAULT_FRESHNESS_TERMS, RetrievalMode
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = _PROJECT_ROOT
@@ -26,19 +28,32 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Local RAG Chat"
     APP_VERSION: str = "0.1.0"
+    ENVIRONMENT: str = "development"
     DEBUG: bool = False
     API_PREFIX: str = "/api"
     HOST: str = "0.0.0.0"
     PORT: int = Field(default=8000, ge=1, le=65535)
+    CORS_ALLOWED_ORIGINS: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+        ]
+    )
 
     LOG_LEVEL: str = "INFO"
     LOG_DIR: Path = _PROJECT_ROOT / "logs"
+    LOG_MAX_BYTES: int = Field(default=10 * 1024 * 1024, ge=1024)
+    LOG_BACKUP_COUNT: int = Field(default=5, ge=1, le=100)
 
     DATA_DIR: Path = _PROJECT_ROOT / "data"
     UPLOAD_DIR: Path = _PROJECT_ROOT / "data" / "uploads"
     CHROMA_DIR: Path = _PROJECT_ROOT / "data" / "chroma"
     METADATA_DIR: Path = _PROJECT_ROOT / "data" / "metadata"
     CHAT_HISTORY_DIR: Path = _PROJECT_ROOT / "data" / "chat_history"
+    BACKUP_DIR: Path = _PROJECT_ROOT / "data" / "backups"
+    EVALUATION_DIR: Path = _PROJECT_ROOT / "data" / "evaluations"
     DATABASE_URL: str = (
         f"sqlite:///{(_PROJECT_ROOT / 'data' / 'metadata' / 'local_rag_chat.db').as_posix()}"
     )
@@ -66,11 +81,59 @@ class Settings(BaseSettings):
     RETRIEVAL_SCORE_THRESHOLD: float | None = Field(
         default=None, ge=-1.0, le=1.0
     )
+    WEB_SEARCH_ENABLED: bool = False
+    DEFAULT_RETRIEVAL_MODE: RetrievalMode = RetrievalMode.KNOWLEDGE_FIRST
+    RETRIEVAL_MIN_EVIDENCE_COUNT: int = Field(default=1, ge=1, le=100)
+    RETRIEVAL_FRESHNESS_TERMS: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_FRESHNESS_TERMS)
+    )
+    WEB_SEARCH_PROVIDER: str = "disabled"
+    WEB_SEARCH_API_KEY: SecretStr = SecretStr("")
+    WEB_SEARCH_ALLOWED_ROLES: list[str] = Field(
+        default_factory=lambda: ["ADMIN", "USER"]
+    )
+    WEB_SEARCH_ALLOWED_DOMAINS: list[str] = Field(default_factory=list)
+    WEB_SEARCH_BLOCKED_DOMAINS: list[str] = Field(default_factory=list)
+    WEB_SEARCH_RESULT_LIMIT: int = Field(default=5, ge=1, le=20)
+    WEB_FETCH_MAX_PAGES: int = Field(default=5, ge=1, le=20)
+    WEB_FETCH_MAX_PAGES_PER_DOMAIN: int = Field(default=2, ge=1, le=10)
+    WEB_SEARCH_QUERY_MAX_CHARS: int = Field(default=512, ge=32, le=4000)
+    WEB_PAGE_MAX_CHARS: int = Field(default=6000, ge=500, le=100_000)
+    WEB_FETCH_MAX_RESPONSE_BYTES: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1024,
+        le=20 * 1024 * 1024,
+    )
+    WEB_SEARCH_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=60)
+    WEB_FETCH_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0, le=60)
+    WEB_TOTAL_TIMEOUT_SECONDS: float = Field(default=12.0, gt=0, le=120)
+    WEB_FETCH_MAX_REDIRECTS: int = Field(default=3, ge=0, le=10)
+    WEB_SEARCH_CACHE_TTL_SECONDS: int = Field(default=300, ge=0, le=3600)
+    WEB_QUERY_LOG_MODE: str = "digest"
+    WEB_CONTENT_CACHE_ENABLED: bool = False
     REBUILD_HTTP_TIMEOUT_SECONDS: float = Field(default=3600.0, gt=0)
     MAX_UPLOAD_SIZE_MB: int = Field(default=20, ge=1)
     ALLOWED_FILE_EXTENSIONS: list[str] = Field(
         default_factory=lambda: [".txt", ".pdf", ".csv", ".json"]
     )
+
+    JWT_SECRET: SecretStr = SecretStr("")
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1, le=1440)
+    AUTH_REQUIRED: bool = False
+    ALLOW_REGISTRATION: bool = True
+    METRICS_SCRAPE_TOKEN: SecretStr = SecretStr("")
+    BACKUP_SIGNING_KEY: SecretStr = SecretStr("")
+    BOOTSTRAP_SECRET: SecretStr = SecretStr("")
+
+    JOB_POLL_INTERVAL_SECONDS: float = Field(default=0.25, gt=0, le=10)
+    JOB_LEASE_SECONDS: int = Field(default=30, ge=5, le=3600)
+    JOB_HEARTBEAT_SECONDS: int = Field(default=5, ge=1, le=300)
+    JOB_PROGRESS_MIN_INTERVAL_SECONDS: float = Field(default=1.0, ge=1.0)
+    BACKUP_MAX_MEMBERS: int = Field(default=10000, ge=1)
+    BACKUP_MAX_MEMBER_BYTES: int = Field(default=512 * 1024 * 1024, ge=1)
+    BACKUP_MAX_TOTAL_BYTES: int = Field(default=4 * 1024 * 1024 * 1024, ge=1)
+    BACKUP_MAX_COMPRESSION_RATIO: float = Field(default=200.0, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=_PROJECT_ROOT / ".env",
@@ -86,6 +149,8 @@ class Settings(BaseSettings):
         "CHROMA_DIR",
         "METADATA_DIR",
         "CHAT_HISTORY_DIR",
+        "BACKUP_DIR",
+        "EVALUATION_DIR",
         mode="before",
     )
     @classmethod
@@ -171,6 +236,75 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("WEB_SEARCH_PROVIDER")
+    @classmethod
+    def normalize_web_search_provider(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        return normalized or "disabled"
+
+    @field_validator("WEB_QUERY_LOG_MODE")
+    @classmethod
+    def validate_web_query_log_mode(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized != "digest":
+            raise ValueError("WEB_QUERY_LOG_MODE 仅支持 digest")
+        return "digest"
+
+    @field_validator("WEB_SEARCH_ALLOWED_ROLES")
+    @classmethod
+    def normalize_web_search_allowed_roles(
+        cls, values: list[str]
+    ) -> list[str]:
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip().upper()
+            if value not in {"ADMIN", "USER"}:
+                raise ValueError(
+                    f"WEB_SEARCH_ALLOWED_ROLES 包含未知角色：{raw_value}"
+                )
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    @field_validator(
+        "WEB_SEARCH_ALLOWED_DOMAINS",
+        "WEB_SEARCH_BLOCKED_DOMAINS",
+    )
+    @classmethod
+    def normalize_web_domains(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip().strip(".").casefold()
+            if not value:
+                raise ValueError("联网域名列表不能包含空值")
+            try:
+                value = value.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise ValueError(f"联网域名无效：{raw_value}") from exc
+            if any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789.-"
+                for character in value
+            ):
+                raise ValueError(f"联网域名无效：{raw_value}")
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    @field_validator("RETRIEVAL_FRESHNESS_TERMS")
+    @classmethod
+    def normalize_freshness_terms(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip()
+            if not value or len(value) > 64:
+                raise ValueError("时效词必须为 1 到 64 个字符")
+            folded = value.casefold()
+            if folded not in {item.casefold() for item in normalized}:
+                normalized.append(value)
+        if not normalized or len(normalized) > 64:
+            raise ValueError("时效词数量必须为 1 到 64")
+        return normalized
+
     @field_validator("API_PREFIX")
     @classmethod
     def normalize_api_prefix(cls, value: str) -> str:
@@ -179,6 +313,29 @@ class Settings(BaseSettings):
             raise ValueError("API_PREFIX 不能为空")
         prefix = prefix if prefix.startswith("/") else f"/{prefix}"
         return prefix.rstrip("/") or "/"
+
+    @field_validator("CORS_ALLOWED_ORIGINS")
+    @classmethod
+    def normalize_cors_origins(cls, values: list[str]) -> list[str]:
+        from urllib.parse import urlsplit
+
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip().rstrip("/")
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(f"CORS origin 不是合法的 HTTP Origin：{raw_value}")
+            if value not in normalized:
+                normalized.append(value)
+        if not normalized:
+            raise ValueError("CORS_ALLOWED_ORIGINS 不能为空")
+        return normalized
 
     @field_validator("DATABASE_URL")
     @classmethod
@@ -200,6 +357,43 @@ class Settings(BaseSettings):
     def validate_chunk_window(self) -> "Settings":
         if self.CHUNK_OVERLAP >= self.CHUNK_SIZE:
             raise ValueError("CHUNK_OVERLAP 必须小于 CHUNK_SIZE")
+        if self.JOB_HEARTBEAT_SECONDS >= self.JOB_LEASE_SECONDS:
+            raise ValueError("JOB_HEARTBEAT_SECONDS 必须小于 JOB_LEASE_SECONDS")
+        overlap = set(self.WEB_SEARCH_ALLOWED_DOMAINS) & set(
+            self.WEB_SEARCH_BLOCKED_DOMAINS
+        )
+        if overlap:
+            raise ValueError(
+                "联网允许域名与禁止域名重复：" + ", ".join(sorted(overlap))
+            )
+        if self.WEB_TOTAL_TIMEOUT_SECONDS < min(
+            self.WEB_SEARCH_TIMEOUT_SECONDS,
+            self.WEB_FETCH_TIMEOUT_SECONDS,
+        ):
+            raise ValueError(
+                "WEB_TOTAL_TIMEOUT_SECONDS 不能小于搜索或抓取超时"
+            )
+        if self.WEB_CONTENT_CACHE_ENABLED:
+            raise ValueError(
+                "本版本不持久化网页正文，WEB_CONTENT_CACHE_ENABLED 必须为 false"
+            )
+        if self.ENVIRONMENT.strip().casefold() == "production":
+            if not self.AUTH_REQUIRED:
+                raise ValueError("生产环境必须启用 AUTH_REQUIRED")
+            missing = [
+                name
+                for name in (
+                    "JWT_SECRET",
+                    "METRICS_SCRAPE_TOKEN",
+                    "BACKUP_SIGNING_KEY",
+                    "BOOTSTRAP_SECRET",
+                )
+                if not getattr(self, name).get_secret_value()
+            ]
+            if missing:
+                raise ValueError(
+                    "生产环境缺少显式 Secret：" + ", ".join(missing)
+                )
         return self
 
     def ensure_directories(self) -> tuple[Path, ...]:
@@ -212,6 +406,8 @@ class Settings(BaseSettings):
             self.CHROMA_DIR,
             self.METADATA_DIR,
             self.CHAT_HISTORY_DIR,
+            self.BACKUP_DIR,
+            self.EVALUATION_DIR,
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
@@ -226,6 +422,14 @@ class Settings(BaseSettings):
         if not self.DASHSCOPE_API_KEY.get_secret_value():
             missing.append("DASHSCOPE_API_KEY")
         return tuple(missing)
+
+    def web_search_provider_configured(self) -> bool:
+        """Report only configurations backed by an installed provider."""
+
+        return (
+            self.WEB_SEARCH_PROVIDER not in {"", "disabled", "none"}
+            and bool(self.WEB_SEARCH_API_KEY.get_secret_value())
+        )
 
 
 @lru_cache(maxsize=1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -17,9 +18,10 @@ from app.core.exceptions import (
     VectorStoreException,
 )
 from app.core.logger import get_logger
-from app.models import FileRecord, RebuildStatus
+from app.models import FileRecord, Job, RebuildStatus
 from app.repositories.file_repository import FileRepository
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
+from app.repositories.job_repository import JobRepository
 from app.schemas.rebuild import (
     CollectionMaintenanceResponse,
     RebuildFailure,
@@ -52,11 +54,25 @@ class KnowledgeBaseRebuildService:
         self.splitter = DocumentSplitterService(settings=settings)
         self.file_service = FileService(db, settings, runtime)
 
-    def rebuild(self, knowledge_base_id: str) -> RebuildResponse:
+    def rebuild(
+        self,
+        knowledge_base_id: str,
+        *,
+        job_id: str | None = None,
+        checkpoint: object | None = None,
+    ) -> RebuildResponse:
         with self.runtime.admin_operation("rebuild_knowledge_base"):
-            return self._rebuild_locked(knowledge_base_id)
+            return self._rebuild_locked(
+                knowledge_base_id, job_id=job_id, checkpoint=checkpoint
+            )
 
-    def _rebuild_locked(self, knowledge_base_id: str) -> RebuildResponse:
+    def _rebuild_locked(
+        self,
+        knowledge_base_id: str,
+        *,
+        job_id: str | None = None,
+        checkpoint: object | None = None,
+    ) -> RebuildResponse:
         knowledge_base = self._get_knowledge_base(knowledge_base_id)
         self._validate_distinct_pointers(knowledge_base)
         if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
@@ -94,8 +110,22 @@ class KnowledgeBaseRebuildService:
         knowledge_base.building_embedding_config_hash = config.config_hash
         knowledge_base.rebuild_status = RebuildStatus.BUILDING
         knowledge_base.rebuild_run_id = run_id
+        knowledge_base.rebuild_job_id = job_id
         knowledge_base.building_started_at = started_at
+        if job_id:
+            job = self.db.get(Job, job_id)
+            if job is not None:
+                job.collection_name = collection_name
+                job.embedding_config_hash = config.config_hash
+                job.payload = {
+                    **dict(job.payload),
+                    "source_collection": source_collection,
+                    "source_previous": source_previous,
+                    "rebuild_run_id": run_id,
+                }
         self.db.commit()
+        if checkpoint is not None:
+            checkpoint("REBUILD_CANDIDATE_CLAIMED", 10, force=True)
 
         try:
             self.runtime.vector_store.create_collection(
@@ -108,6 +138,8 @@ class KnowledgeBaseRebuildService:
         except Exception:
             self._persist_rebuild_failure(knowledge_base.id, collection_name)
             raise
+        if checkpoint is not None:
+            checkpoint("REBUILD_COLLECTION_CREATED", 20, force=True)
 
         failures: list[RebuildFailure] = []
         expected_counts: dict[str, int] = {}
@@ -125,8 +157,17 @@ class KnowledgeBaseRebuildService:
                     embeddings=embeddings,
                     config=config,
                     role="building",
+                    processing_job_id=job_id,
+                    vector_run_id=run_id,
+                    expected_chunk_count=len(chunks),
                 )
                 expected_counts[file_record.id] = len(chunks)
+                if checkpoint is not None and file_records:
+                    completed = len(expected_counts) + len(failures)
+                    checkpoint(
+                        "REBUILD_FILES",
+                        20 + int(55 * completed / len(file_records)),
+                    )
             except Exception as exc:
                 failures.append(
                     RebuildFailure(
@@ -181,6 +222,8 @@ class KnowledgeBaseRebuildService:
         except Exception:
             self._persist_rebuild_failure(knowledge_base.id, collection_name)
             raise
+        if checkpoint is not None:
+            checkpoint("REBUILD_CANDIDATE_VERIFIED", 80, force=True)
 
         self.db.expire_all()
         current_kb = self._get_knowledge_base(knowledge_base.id)
@@ -211,6 +254,7 @@ class KnowledgeBaseRebuildService:
             current_kb.building_embedding_config_hash = None
             current_kb.rebuild_status = RebuildStatus.IDLE
             current_kb.rebuild_run_id = None
+            current_kb.rebuild_job_id = None
             current_kb.building_started_at = None
             for record in file_records:
                 current_record = self.files.get_by_id(record.id)
@@ -276,6 +320,134 @@ class KnowledgeBaseRebuildService:
         with self.runtime.admin_operation("cleanup_retired"):
             return self._cleanup_retired_locked(knowledge_base_id)
 
+    def cleanup_indexes(
+        self,
+        knowledge_base_id: str,
+        *,
+        cleanup_previous: bool,
+        cleanup_orphans: bool,
+    ) -> dict[str, Any]:
+        """Delete only server-resolved, revalidated safe Collection targets."""
+
+        with self.runtime.admin_operation("cleanup_indexes"):
+            with self.runtime.vector_write_lock:
+                deleted: list[str] = []
+                skipped: list[dict[str, str]] = []
+                cleanup = self._cleanup_retired_locked(knowledge_base_id)
+                if cleanup.collection_name is not None:
+                    deleted.append(cleanup.collection_name)
+                knowledge_base = self._get_knowledge_base(
+                    knowledge_base_id
+                )
+                self._validate_distinct_pointers(knowledge_base)
+                jobs = JobRepository(self.db)
+
+                if cleanup_previous and knowledge_base.previous_collection_name:
+                    previous = knowledge_base.previous_collection_name
+                    if jobs.collection_is_pinned(previous):
+                        skipped.append(
+                            {
+                                "collection_name": previous,
+                                "reason": "Previous Collection 正被评估 Job pin",
+                            }
+                        )
+                    elif not self.runtime.vector_store.collection_exists(
+                        previous
+                    ):
+                        if not self.knowledge_bases.clear_previous_if_matches(
+                            knowledge_base.id, previous
+                        ):
+                            raise ConflictException(
+                                "Previous 指针已发生变化"
+                            )
+                        self.db.commit()
+                        deleted.append(previous)
+                    else:
+                        self.runtime.vector_store.get_collection(
+                            previous,
+                            knowledge_base_id=knowledge_base.id,
+                            expected_config_hash=(
+                                knowledge_base.previous_embedding_config_hash
+                            ),
+                            role="previous",
+                            for_write=False,
+                        )
+                        self.runtime.vector_store.delete_collection(previous)
+                        if not self.knowledge_bases.clear_previous_if_matches(
+                            knowledge_base.id, previous
+                        ):
+                            self.db.rollback()
+                            raise VectorStoreException(
+                                "Previous Collection 已删除但指针清理失败"
+                            )
+                        self.db.commit()
+                        deleted.append(previous)
+
+                if cleanup_orphans:
+                    self.db.expire_all()
+                    knowledge_base = self._get_knowledge_base(
+                        knowledge_base_id
+                    )
+                    referenced = {
+                        knowledge_base.active_collection_name,
+                        knowledge_base.previous_collection_name,
+                        knowledge_base.building_collection_name,
+                        knowledge_base.cleanup_collection_name,
+                    }
+                    for collection in self.runtime.vector_store.list_collections():
+                        name = str(collection.name)
+                        metadata = getattr(collection, "metadata", None)
+                        if (
+                            name in referenced
+                            or not isinstance(metadata, dict)
+                            or str(metadata.get("knowledge_base_id"))
+                            != str(knowledge_base.id)
+                        ):
+                            continue
+                        lifecycle = metadata.get("lifecycle_status")
+                        if lifecycle not in {"RETIRED", "FAILED"}:
+                            skipped.append(
+                                {
+                                    "collection_name": name,
+                                    "reason": (
+                                        "孤立 Collection lifecycle "
+                                        "不允许自动清理"
+                                    ),
+                                }
+                            )
+                            continue
+                        if jobs.collection_is_referenced_by_nonterminal_job(
+                            name
+                        ):
+                            skipped.append(
+                                {
+                                    "collection_name": name,
+                                    "reason": "Collection 正被非终态 Job 引用",
+                                }
+                            )
+                            continue
+                        try:
+                            self.runtime.vector_store.validate_collection(
+                                collection,
+                                knowledge_base_id=knowledge_base.id,
+                            )
+                        except Exception as exc:
+                            skipped.append(
+                                {
+                                    "collection_name": name,
+                                    "reason": str(exc),
+                                }
+                            )
+                            continue
+                        self.runtime.vector_store.delete_collection(name)
+                        deleted.append(name)
+                return {
+                    "status": "SUCCESS" if deleted else "NOOP",
+                    "knowledge_base_id": knowledge_base.id,
+                    "deleted": deleted,
+                    "skipped": skipped,
+                }
+
     def _cleanup_retired_locked(
         self, knowledge_base_id: str
     ) -> CollectionMaintenanceResponse:
@@ -286,6 +458,10 @@ class KnowledgeBaseRebuildService:
             return CollectionMaintenanceResponse(
                 status="NOOP",
                 knowledge_base_id=UUID(knowledge_base.id),
+            )
+        if JobRepository(self.db).collection_is_pinned(name):
+            raise ConflictException(
+                "Cleanup Collection 正被非终态评估 Job pin，延迟清理"
             )
         if name in {
             knowledge_base.active_collection_name,
@@ -330,6 +506,15 @@ class KnowledgeBaseRebuildService:
         self, knowledge_base_id: str
     ) -> CollectionMaintenanceResponse:
         with self.runtime.admin_operation("abort_building"):
+            jobs = JobRepository(self.db)
+            if jobs.has_nonterminal_knowledge_base_job(
+                knowledge_base_id
+            ) or jobs.has_nonterminal_file_job_for_knowledge_base(
+                knowledge_base_id
+            ):
+                raise ConflictException(
+                    "知识库或文件维护 Job 尚未终态，不能 abort-building"
+                )
             knowledge_base = self._get_knowledge_base(knowledge_base_id)
             self._validate_distinct_pointers(knowledge_base)
             name = knowledge_base.building_collection_name
@@ -377,58 +562,77 @@ class KnowledgeBaseRebuildService:
         self, knowledge_base_id: str
     ) -> CollectionMaintenanceResponse:
         with self.runtime.admin_operation("rollback_collection"):
-            knowledge_base = self._get_knowledge_base(knowledge_base_id)
-            self._validate_distinct_pointers(knowledge_base)
-            if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
-                raise ConflictException("知识库正在重建，不能回滚")
-            if self.files.has_processing(knowledge_base.id):
-                raise ConflictException("知识库存在 PROCESSING 文件，不能回滚")
-            previous = knowledge_base.previous_collection_name
-            if not previous:
-                return CollectionMaintenanceResponse(
-                    status="NOOP",
-                    knowledge_base_id=UUID(knowledge_base.id),
-                )
-            collection = self.runtime.vector_store.get_collection(
-                previous,
-                knowledge_base_id=knowledge_base.id,
-                expected_config_hash=(
-                    knowledge_base.previous_embedding_config_hash
-                ),
-                role="previous",
-                for_write=False,
+            with self.runtime.vector_write_lock:
+                return self._rollback_locked(knowledge_base_id)
+
+    def _rollback_locked(
+        self, knowledge_base_id: str
+    ) -> CollectionMaintenanceResponse:
+        knowledge_base = self._get_knowledge_base(knowledge_base_id)
+        self._validate_distinct_pointers(knowledge_base)
+        jobs = JobRepository(self.db)
+        if jobs.has_nonterminal_knowledge_base_job(
+            knowledge_base.id
+        ) or jobs.has_nonterminal_file_job_for_knowledge_base(
+            knowledge_base.id
+        ):
+            raise ConflictException(
+                "知识库或文件维护 Job 尚未终态，不能回滚"
             )
-            counts = self.runtime.vector_store.collection_file_counts(previous)
-            old_active = knowledge_base.active_collection_name
-            old_active_hash = knowledge_base.active_embedding_config_hash
-            previous_hash = knowledge_base.previous_embedding_config_hash
-            knowledge_base.active_collection_name = previous
-            knowledge_base.active_embedding_config_hash = previous_hash
-            knowledge_base.previous_collection_name = old_active
-            knowledge_base.previous_embedding_config_hash = old_active_hash
-            for record in self.files.list_by_knowledge_base(knowledge_base.id):
-                count = counts.get(record.id, 0)
-                record.chunk_count = count
-                record.has_active_vectors = count > 0
-                record.active_index_config_hash = previous_hash if count else None
-            self.db.commit()
-            try:
-                self.runtime.vector_store.set_lifecycle(previous, "ACTIVE")
-                if old_active:
-                    self.runtime.vector_store.set_lifecycle(
-                        old_active, "RETIRED"
-                    )
-            except Exception:
-                logger.critical(
-                    "回滚指针已提交但 lifecycle 更新失败（kb_id=%s）",
-                    knowledge_base.id,
-                    exc_info=True,
-                )
+        if knowledge_base.rebuild_status is RebuildStatus.BUILDING:
+            raise ConflictException("知识库正在重建，不能回滚")
+        if self.files.has_processing(knowledge_base.id):
+            raise ConflictException("知识库存在 PROCESSING 文件，不能回滚")
+        previous = knowledge_base.previous_collection_name
+        if not previous:
             return CollectionMaintenanceResponse(
-                status="SUCCESS",
+                status="NOOP",
                 knowledge_base_id=UUID(knowledge_base.id),
-                collection_name=collection.name,
             )
+        if jobs.collection_is_pinned(previous):
+            raise ConflictException(
+                "Previous Collection 正被评估 Job pin，不能切换为写入目标"
+            )
+        collection = self.runtime.vector_store.get_collection(
+            previous,
+            knowledge_base_id=knowledge_base.id,
+            expected_config_hash=(
+                knowledge_base.previous_embedding_config_hash
+            ),
+            role="previous",
+            for_write=False,
+        )
+        counts = self.runtime.vector_store.collection_file_counts(previous)
+        old_active = knowledge_base.active_collection_name
+        old_active_hash = knowledge_base.active_embedding_config_hash
+        previous_hash = knowledge_base.previous_embedding_config_hash
+        knowledge_base.active_collection_name = previous
+        knowledge_base.active_embedding_config_hash = previous_hash
+        knowledge_base.previous_collection_name = old_active
+        knowledge_base.previous_embedding_config_hash = old_active_hash
+        for record in self.files.list_by_knowledge_base(knowledge_base.id):
+            count = counts.get(record.id, 0)
+            record.chunk_count = count
+            record.has_active_vectors = count > 0
+            record.active_index_config_hash = previous_hash if count else None
+        self.db.commit()
+        try:
+            self.runtime.vector_store.set_lifecycle(previous, "ACTIVE")
+            if old_active:
+                self.runtime.vector_store.set_lifecycle(
+                    old_active, "RETIRED"
+                )
+        except Exception:
+            logger.critical(
+                "回滚指针已提交但 lifecycle 更新失败（kb_id=%s）",
+                knowledge_base.id,
+                exc_info=True,
+            )
+        return CollectionMaintenanceResponse(
+            status="SUCCESS",
+            knowledge_base_id=UUID(knowledge_base.id),
+            collection_name=collection.name,
+        )
 
     def _cleanup_failed_building_locked(self, knowledge_base: object) -> None:
         name = knowledge_base.building_collection_name

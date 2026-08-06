@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     Enum as SqlEnum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -40,6 +41,18 @@ class FileRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("file_size > 0", name="ck_file_records_file_size"),
         CheckConstraint("chunk_count >= 0", name="ck_file_records_chunk_count"),
+        Index(
+            "ix_file_records_kb_updated",
+            "knowledge_base_id",
+            "updated_at",
+            "id",
+        ),
+        Index(
+            "ix_file_records_kb_status_updated",
+            "knowledge_base_id",
+            "status",
+            "updated_at",
+        ),
     )
 
     knowledge_base_id: Mapped[str] = mapped_column(
@@ -77,6 +90,11 @@ class FileRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     last_successful_indexed_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(), nullable=True
+    )
+    processing_job_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("jobs.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="files")

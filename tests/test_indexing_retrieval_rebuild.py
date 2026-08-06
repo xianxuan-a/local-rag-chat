@@ -9,6 +9,7 @@ from app.models import FileRecord, FileStatus, KnowledgeBase
 from app.core.exceptions import ModelServiceException, VectorStoreException
 from app.services.retrieval_service import RetrievalService
 from tests.fakes import FakeEmbedding
+from tests.conftest import wait_for_job
 
 
 def _create_kb(client, name: str = "index-kb") -> str:
@@ -41,9 +42,10 @@ def test_process_retrieve_rebuild_and_rollback(client, app, test_settings) -> No
     uploaded = _upload(client, kb_id)
 
     processed = client.post(f"/api/files/{uploaded['id']}/process")
-    assert processed.status_code == 200
-    assert processed.json()["data"]["status"] == "SUCCESS"
-    assert processed.json()["data"]["chunk_count"] == 1
+    process_job = wait_for_job(client, processed)
+    assert process_job["status"] == "SUCCEEDED"
+    assert process_job["result"]["status"] == "SUCCESS"
+    assert process_job["result"]["chunk_count"] == 1
 
     with app.state.session_factory() as db:
         record = db.get(FileRecord, uploaded["id"])
@@ -65,8 +67,9 @@ def test_process_retrieve_rebuild_and_rollback(client, app, test_settings) -> No
         assert sources[0].score > 0.99
 
     rebuilt = client.post(f"/api/knowledge-bases/{kb_id}/rebuild")
-    assert rebuilt.status_code == 200
-    rebuild_data = rebuilt.json()["data"]
+    rebuild_job = wait_for_job(client, rebuilt)
+    assert rebuild_job["status"] == "SUCCEEDED"
+    rebuild_data = rebuild_job["result"]
     assert rebuild_data["status"] == "SUCCESS"
     assert rebuild_data["switched"] is True
     assert rebuild_data["source_collection"] == first_collection
@@ -83,6 +86,46 @@ def test_process_retrieve_rebuild_and_rollback(client, app, test_settings) -> No
     assert fake.query_calls == 1
 
 
+def test_index_state_api_and_server_resolved_previous_cleanup(
+    client, app
+) -> None:
+    _install_fake(app)
+    kb_id = _create_kb(client, "index-state-api")
+    uploaded = _upload(client, kb_id, "index state")
+    assert wait_for_job(
+        client, client.post(f"/api/files/{uploaded['id']}/process")
+    )["status"] == "SUCCEEDED"
+    assert wait_for_job(
+        client, client.post(f"/api/knowledge-bases/{kb_id}/rebuild")
+    )["status"] == "SUCCEEDED"
+
+    response = client.get(f"/api/indexes?knowledge_base_id={kb_id}")
+    assert response.status_code == 200, response.text
+    state = response.json()["data"][0]
+    assert state["knowledge_base_id"] == kb_id
+    by_role = {item["role"]: item for item in state["collections"]}
+    assert by_role["active"]["exists"] is True
+    assert by_role["active"]["safe_to_cleanup"] is False
+    assert by_role["active"]["chunk_count"] == 1
+    assert by_role["previous"]["safe_to_cleanup"] is True
+    assert state["latest_job"]["job_type"] == "KB_REBUILD"
+
+    cleanup = client.post(
+        f"/api/knowledge-bases/{kb_id}/cleanup-retired",
+        json={"cleanup_previous": True, "cleanup_orphans": False},
+    )
+    terminal = wait_for_job(client, cleanup)
+    assert terminal["status"] == "SUCCEEDED"
+    assert terminal["result"]["deleted"]
+    refreshed = client.get(
+        f"/api/indexes?knowledge_base_id={kb_id}"
+    ).json()["data"][0]
+    assert all(
+        item["role"] != "previous" for item in refreshed["collections"]
+    )
+    assert refreshed["latest_job"]["job_type"] == "KB_CLEANUP_RETIRED"
+
+
 def test_configuration_conflict_happens_before_file_claim(
     client,
     app,
@@ -90,7 +133,9 @@ def test_configuration_conflict_happens_before_file_claim(
     _install_fake(app)
     kb_id = _create_kb(client, "conflict-kb")
     uploaded = _upload(client, kb_id, "configuration conflict")
-    assert client.post(f"/api/files/{uploaded['id']}/process").status_code == 200
+    assert wait_for_job(
+        client, client.post(f"/api/files/{uploaded['id']}/process")
+    )["status"] == "SUCCEEDED"
 
     with app.state.session_factory() as db:
         knowledge_base = db.get(KnowledgeBase, kb_id)
@@ -100,7 +145,7 @@ def test_configuration_conflict_happens_before_file_claim(
 
     response = client.post(f"/api/files/{uploaded['id']}/process")
 
-    assert response.status_code == 409
+    assert wait_for_job(client, response)["status"] == "FAILED"
     with app.state.session_factory() as db:
         record = db.get(FileRecord, uploaded["id"])
         assert record is not None
@@ -126,7 +171,8 @@ def test_global_admin_lock_blocks_other_knowledge_base_management(
                 client.post,
                 f"/api/knowledge-bases/{kb_id}/rebuild",
             ).result()
-        assert response.status_code == 409
+            assert response.status_code == 409
+            assert "知识库管理操作" in response.json()["message"]
     finally:
         lock.release()
 
@@ -147,7 +193,7 @@ def test_first_embedding_failure_keeps_no_active_vectors(client, app) -> None:
 
     response = client.post(f"/api/files/{uploaded['id']}/process")
 
-    assert response.status_code == 500
+    assert wait_for_job(client, response)["status"] == "FAILED"
     with app.state.session_factory() as db:
         record = db.get(FileRecord, uploaded["id"])
         assert record is not None
@@ -168,7 +214,9 @@ def test_failed_reprocessing_preserves_old_active_index(client, app) -> None:
     _install_fake(app)
     kb_id = _create_kb(client, "retry-failure-kb")
     uploaded = _upload(client, kb_id, "old index remains")
-    assert client.post(f"/api/files/{uploaded['id']}/process").status_code == 200
+    assert wait_for_job(
+        client, client.post(f"/api/files/{uploaded['id']}/process")
+    )["status"] == "SUCCEEDED"
     with app.state.session_factory() as db:
         old = db.get(FileRecord, uploaded["id"])
         assert old is not None
@@ -180,7 +228,7 @@ def test_failed_reprocessing_preserves_old_active_index(client, app) -> None:
     store._embedding_cache.clear()
     response = client.post(f"/api/files/{uploaded['id']}/process")
 
-    assert response.status_code == 500
+    assert wait_for_job(client, response)["status"] == "FAILED"
     with app.state.session_factory() as db:
         record = db.get(FileRecord, uploaded["id"])
         assert record is not None
@@ -212,7 +260,7 @@ def test_failed_initial_candidate_is_tracked_and_retried(
 
     monkeypatch.setattr(store, "replace_file_documents", fail_once)
     first = client.post(f"/api/files/{uploaded['id']}/process")
-    assert first.status_code == 500
+    assert wait_for_job(client, first)["status"] == "FAILED"
     with app.state.session_factory() as db:
         knowledge_base = db.get(KnowledgeBase, kb_id)
         record = db.get(FileRecord, uploaded["id"])
@@ -224,7 +272,7 @@ def test_failed_initial_candidate_is_tracked_and_retried(
 
     second = client.post(f"/api/files/{uploaded['id']}/process")
 
-    assert second.status_code == 200
+    assert wait_for_job(client, second)["status"] == "SUCCEEDED"
     with app.state.session_factory() as db:
         knowledge_base = db.get(KnowledgeBase, kb_id)
         assert knowledge_base is not None

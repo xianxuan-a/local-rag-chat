@@ -1,11 +1,12 @@
-"""Strict idempotent SQLite compatibility for newly added runtime columns."""
+"""Application runtime refuses unversioned schemas and performs no DDL."""
 
+import pytest
 from sqlalchemy import inspect, text
 
 from app.database.sqlite import create_db_engine, ensure_runtime_columns
 
 
-def test_runtime_columns_are_added_idempotently_to_legacy_tables(tmp_path) -> None:
+def test_runtime_columns_are_never_added_to_legacy_tables(tmp_path) -> None:
     engine = create_db_engine(
         f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}"
     )
@@ -23,8 +24,8 @@ def test_runtime_columns_are_added_idempotently_to_legacy_tables(tmp_path) -> No
             )
         )
 
-    ensure_runtime_columns(engine)
-    ensure_runtime_columns(engine)
+    with pytest.raises(RuntimeError, match="不会自动建表或迁移"):
+        ensure_runtime_columns(engine)
 
     inspector = inspect(engine)
     file_columns = {
@@ -35,12 +36,12 @@ def test_runtime_columns_are_added_idempotently_to_legacy_tables(tmp_path) -> No
         column["name"]
         for column in inspector.get_columns("knowledge_bases")
     }
-    assert {
+    assert not ({
         "has_active_vectors",
         "active_index_config_hash",
         "last_successful_indexed_at",
-    } <= file_columns
-    assert {
+    } & file_columns)
+    assert not ({
         "active_collection_name",
         "previous_collection_name",
         "building_collection_name",
@@ -48,5 +49,5 @@ def test_runtime_columns_are_added_idempotently_to_legacy_tables(tmp_path) -> No
         "rebuild_status",
         "rebuild_run_id",
         "building_started_at",
-    } <= kb_columns
+    } & kb_columns)
     engine.dispose()

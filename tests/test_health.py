@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
+from uuid import UUID
 
 
 def test_health_returns_uniform_success(client: TestClient) -> None:
@@ -14,6 +15,37 @@ def test_health_returns_uniform_success(client: TestClient) -> None:
         "message": "success",
         "data": {"status": "ok"},
     }
+
+
+def test_live_and_ready_have_distinct_semantics(client: TestClient) -> None:
+    live = client.get("/health/live")
+    ready = client.get("/health/ready")
+
+    assert live.status_code == 200
+    assert live.json()["data"] == {"status": "live"}
+    assert ready.status_code == 200
+    assert ready.json()["data"]["status"] == "ready"
+    assert ready.json()["data"]["checks"] == {
+        "sqlite": "ok",
+        "data_dir": "ok",
+        "upload_dir": "ok",
+        "chroma_dir": "ok",
+        "metadata_dir": "ok",
+        "chroma": "ok",
+        "job_worker": "ok",
+    }
+
+
+def test_request_id_is_validated_and_returned(client: TestClient) -> None:
+    generated = client.get(
+        "/health/live", headers={"X-Request-ID": "unsafe log text"}
+    )
+    UUID(generated.headers["X-Request-ID"])
+    supplied = "11111111-1111-1111-1111-111111111111"
+    echoed = client.get(
+        "/health/live", headers={"X-Request-ID": supplied}
+    )
+    assert echoed.headers["X-Request-ID"] == supplied
 
 
 def test_swagger_document_is_available(client: TestClient) -> None:

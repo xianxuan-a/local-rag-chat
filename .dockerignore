@@ -17,6 +17,8 @@ data/uploads/*
 data/chroma/*
 data/metadata/*
 data/chat_history/*
+data/backups/*
+data/evaluations/*
 tests
 *.png
 *.db
