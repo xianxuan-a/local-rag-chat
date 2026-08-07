@@ -2,6 +2,20 @@
 
 Local RAG Chat 是单机、单实例的本地知识库服务，包含认证与所有权、文件索引、版本化 Chroma Collection、会话历史、同步/流式 RAG、持久化 Job、固定 Collection 评估、在线逻辑备份及安全离线恢复。
 
+## 可复现发布基线
+
+发布候选必须绑定完整 Git commit SHA，并从该提交的全新 clone 验证，不能依赖原工作区中未跟踪的文件。`requirements.txt` 是人工维护的 Python 直接依赖清单，`requirements.lock` 锁定发布安装使用的完整传递依赖；前端使用 lockfile v3 的 `frontend/package-lock.json` 和 `npm ci`。Docker 后端同样只从 `requirements.lock` 安装。
+
+支持范围为 Python 3.11 或更高、Node.js `^20.19.0 || >=22.12.0`、npm 10 或更高、Docker Engine 24 或更高、Docker Compose 2.20 或更高，以及 Git 2.39 或更高。本次基线验证环境的精确版本、文件分类和复现流程记录在 [`docs/release-baseline.md`](docs/release-baseline.md)。
+
+每次发布前先运行仓库自带审计；`--require-clean` 会同时拒绝已修改或未跟踪的发布工作树：
+
+```powershell
+python scripts/verify_release_baseline.py --require-clean
+```
+
+审计会检查必需源码、迁移、测试、脚本、锁文件和 README 本地链接是否均被 Git 跟踪，并检查 ignore 边界、常见真实凭据特征、用户本机绝对路径及超过 10 MiB 的 tracked 文件。`.env`、数据库、Chroma、上传、备份、日志、PID、依赖目录和构建/Playwright 产物不得提交；`.env.example` 和五个不含 Secret 的前端模式配置必须保持可跟踪。
+
 ## 不可突破的运行边界
 
 - FastAPI 与 Job worker 在同一进程运行，业务 worker 只有一个线程。
@@ -19,7 +33,7 @@ Local RAG Chat 是单机、单实例的本地知识库服务，包含认证与�
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements.lock
 Copy-Item .env.example .env
 python scripts/init_secrets.py --env-file .env
 Set-Location frontend
@@ -357,6 +371,8 @@ python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --toke
 
 Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 通过 `python run.py` 统一读取监听配置，并固定 backend `HOST=0.0.0.0`、`workers=1` 和 `AUTH_REQUIRED=true`。生产环境不能以免认证模式启动；四个生产 Secret 均为必填且至少 32 UTF-8 bytes，Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失值，应用配置模型继续负责 Host/Auth 边界、认证和 Secret 强度校验。
 
+后端镜像基于固定的 Python 3.11 runtime，并从 `requirements.lock` 安装完整传递依赖；更新 `requirements.txt` 后必须在干净环境重新解析锁文件、运行完整验证并与代码一起提交，不能只更新直接依赖清单。
+
 首次部署先从示例生成本机 `.env`，不要把生成后的值提交到仓库：
 
 ```powershell
@@ -410,6 +426,7 @@ docker compose config --format json
 ## 验证
 
 ```powershell
+python scripts/verify_release_baseline.py
 pytest -q
 python -m compileall app scripts ui tests
 # 需要正在运行的 Docker daemon；测试只创建并清理唯一项目名下的新卷。

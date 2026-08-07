@@ -17,6 +17,19 @@ htmlcov/
 
 # 本地环境与编辑器
 .env
+.env.*
+!.env.example
+!frontend/.env.example
+!frontend/.env.development
+!frontend/.env.mock
+!frontend/.env.real
+!frontend/.env.test
+.secrets/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
 .idea/
 .vscode/
 *.swp
@@ -33,6 +46,7 @@ artifacts/
 *.db.pre-cutover-*
 *.sqlite
 *.sqlite3
+*.pid
 
 # 运行时数据；只提交目录占位文件
 data/uploads/*

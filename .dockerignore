@@ -3,6 +3,14 @@
 .gitattributes
 .idea
 .env
+.env.*
+.secrets
+secrets
+*.pem
+*.key
+*.p12
+*.pfx
+*.pid
 .local-rag-chat.json
 .venv
 venv

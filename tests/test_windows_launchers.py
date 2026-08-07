@@ -178,8 +178,9 @@ ThreadingHTTPServer(("127.0.0.1", port), SimpleHTTPRequestHandler).serve_forever
     )
     npm = project / "npm.cmd"
     npm.write_text(
-        f'@echo off\r\n"{sys.executable}" "%~dp0frontend\\frontend_server.py" %7\r\n',
-        encoding="utf-8",
+        '@echo off\r\n"%LOCAL_RAG_LAUNCHER_TEST_PYTHON%" '
+        '"%~dp0frontend\\frontend_server.py" %7\r\n',
+        encoding="ascii",
     )
     return runtime, npm
 
@@ -190,9 +191,12 @@ def _run_cmd(path: Path, *arguments: str, timeout: int = 45) -> subprocess.Compl
     if argument_line:
         command_line += f" {argument_line}"
     command_line += '"'
+    environment = os.environ.copy()
+    environment["LOCAL_RAG_LAUNCHER_TEST_PYTHON"] = sys.executable
     return subprocess.run(
         command_line,
         cwd=Path(os.environ["SystemRoot"]) / "System32",
+        env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

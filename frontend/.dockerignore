@@ -11,3 +11,5 @@ e2e
 .git
 .gitignore
 README.md
+.env.local
+.env.*.local
