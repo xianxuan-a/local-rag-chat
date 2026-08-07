@@ -179,14 +179,30 @@ downgrade。应用不会迁移真实数据库；升级仍需用户在停机窗�
 
 ## 认证边界
 
-- 本地开发默认 `AUTH_REQUIRED=false`，前端不提供登录页，所有请求以迁移内置的本地单用户管理员身份执行。
+- 本地开发默认 `HOST=127.0.0.1`、`AUTH_REQUIRED=false`，前端不提供登录页，所有请求以迁移内置的本地单用户管理员身份执行。该身份具有管理员权限，因此免认证模式只能用于当前机器。
+- 免认证只接受 `localhost`、IPv4 `127.0.0.0/8`、IPv6 `::1`（配置可写成 `[::1]`）。程序不会通过 DNS 证明其他主机名安全；`localhost.`、自定义主机名、通配地址、局域网 IP 和公网 IP 均要求 `AUTH_REQUIRED=true`。
+- 监听 `0.0.0.0`、`::`，或通过容器/反向代理提供访问时必须启用认证。CORS 和 `X-Forwarded-For` 都不是访问控制，不能让不安全的免认证监听变得安全；不要把 loopback 免认证端口再通过本地代理暴露出去。
 - 生产环境强制要求 `AUTH_REQUIRED=true`；关闭认证会在配置校验阶段直接拒绝启动。
+- 仓库支持的后端入口是 `python run.py`，监听地址统一来自 `HOST`。当前启动体系不提供 Unix socket；直接使用 Uvicorn CLI 覆盖 `--host` 会绕过统一配置，不属于受支持部署方式。
 - 用户名和邮箱保留展示值，同时以 `NFKC + casefold` 保存规范化值并唯一约束；登录使用相同规则。
 - 密码必须是 12–72 个 UTF-8 字节，超出 bcrypt 72 字节上限会在哈希前拒绝。
 - JWT 只以 `sub` 定位用户。每个请求都从数据库重新读取 `is_active` 和 `role`，不信任 token 中的旧权限。
 - `jti` 只用于追踪，本版本没有撤销表。退出登录只是客户端删除 token；已经签发的 token 不会被服务端撤销。
 - 用户注册由 `ALLOW_REGISTRATION` 显式控制；Compose 生产默认关闭。
+- `/health`、`/health/live` 和 `/health/ready` 保持匿名，便于本机和容器健康检查；它们不提供管理员业务操作。`/metrics` 仍要求独立 scrape token。
 - `/metrics` 不接受管理员 JWT 代替鉴权，必须提供独立长期请求头 `X-Metrics-Scrape-Token`。
+
+需要从局域网访问时，正确做法是生成 Secret、启用认证并显式设置非 loopback Host，而不是关闭校验：
+
+```powershell
+python scripts/init_secrets.py --env-file .env
+$env:ENVIRONMENT="production"
+$env:HOST="0.0.0.0"
+$env:AUTH_REQUIRED="true"
+python run.py
+```
+
+生产 Secret 应来自 `.env` 或部署系统的 Secret 注入；不要把真实值写进脚本或提交到 Git。
 
 主要认证接口：
 
@@ -339,7 +355,7 @@ python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --toke
 
 ## Docker
 
-Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 同时固定 backend `workers=1` 和 `AUTH_REQUIRED=true`。生产环境不能以免认证模式启动；四个生产 Secret 均为必填且至少 32 UTF-8 bytes，Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失值，应用配置模型继续负责认证和 Secret 强度校验。
+Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 通过 `python run.py` 统一读取监听配置，并固定 backend `HOST=0.0.0.0`、`workers=1` 和 `AUTH_REQUIRED=true`。生产环境不能以免认证模式启动；四个生产 Secret 均为必填且至少 32 UTF-8 bytes，Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失值，应用配置模型继续负责 Host/Auth 边界、认证和 Secret 强度校验。
 
 首次部署先从示例生成本机 `.env`，不要把生成后的值提交到仓库：
 
@@ -389,7 +405,7 @@ docker compose config --format json
 - backend 非零退出：检查生产认证、Secret 强度、数据库 revision 和实例锁日志，不要用 `AUTH_REQUIRED=false` 或 `ENVIRONMENT=development` 绕过。
 - backend 为 `unhealthy`：直接查看 `/health/ready` 返回的失败检查项和 backend 日志。
 
-本地 Python 开发仍沿用 `.env.example` 的 `ENVIRONMENT=development`、`AUTH_REQUIRED=false`；这一开发默认值不会覆盖 Compose 中固定的生产认证设置。
+本地 Python 开发仍沿用 `.env.example` 的 `ENVIRONMENT=development`、`HOST=127.0.0.1`、`AUTH_REQUIRED=false`；Windows 启动器也会显式覆盖为相同 loopback。Compose 固定使用生产认证和非 loopback Host，不接受本地免认证默认值。
 
 ## 验证
 

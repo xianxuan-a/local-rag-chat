@@ -55,6 +55,8 @@ def test_compose_expands_to_authenticated_migration_gated_backend() -> None:
 
     assert backend["environment"]["ENVIRONMENT"] == "production"
     assert backend["environment"]["AUTH_REQUIRED"] == "true"
+    assert backend["environment"]["HOST"] == "0.0.0.0"
+    assert backend["command"] == ["python", "run.py"]
     assert backend["build"]["args"]["PIP_INDEX_URL"] == (
         "https://pypi.org/simple"
     )
@@ -92,6 +94,9 @@ def test_compose_uses_vue_real_frontend_and_profiles_legacy_streamlit() -> None:
 
 
 def test_frontend_image_and_nginx_contract() -> None:
+    backend_dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
     dockerfile = (PROJECT_ROOT / "frontend" / "Dockerfile").read_text(
         encoding="utf-8"
     )
@@ -99,6 +104,7 @@ def test_frontend_image_and_nginx_contract() -> None:
         encoding="utf-8"
     )
 
+    assert 'CMD ["python", "run.py"]' in backend_dockerfile
     assert "FROM node:24-alpine AS build" in dockerfile
     assert "RUN npm ci" in dockerfile
     assert "npm run build:real" in dockerfile

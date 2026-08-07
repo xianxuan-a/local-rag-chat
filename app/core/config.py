@@ -8,6 +8,7 @@ the application never mutates the filesystem.
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_address
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,6 +22,49 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = _PROJECT_ROOT
 
 
+def normalize_listen_host(value: object) -> str:
+    """Normalize a Uvicorn host without resolving DNS names."""
+
+    if value is None:
+        raise ValueError("HOST 不能为空")
+    host = str(value).strip()
+    if not host:
+        raise ValueError("HOST 不能为空")
+    if "%" in host:
+        raise ValueError("HOST 不支持 IPv6 zone identifier")
+    if host.startswith("[") or host.endswith("]"):
+        if not (host.startswith("[") and host.endswith("]")):
+            raise ValueError("HOST 的 IPv6 方括号不完整")
+        candidate = host[1:-1]
+        try:
+            address = ip_address(candidate)
+        except ValueError as exc:
+            raise ValueError("HOST 方括号内必须是 IPv6 地址") from exc
+        if address.version != 6:
+            raise ValueError("HOST 只允许为 IPv6 地址使用方括号")
+        return str(address)
+    if "[" in host or "]" in host:
+        raise ValueError("HOST 的 IPv6 方括号格式无效")
+    try:
+        return str(ip_address(host))
+    except ValueError:
+        return host.casefold() if host.casefold() == "localhost" else host
+
+
+def is_explicit_loopback_host(host: str) -> bool:
+    """Return true only for literal loopback values; never perform DNS."""
+
+    if host.casefold() == "localhost":
+        return True
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if address.version == 4:
+        return address.is_loopback
+    return address == ip_address("::1")
+
+
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables and ``.env``."""
 
@@ -31,7 +75,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = False
     API_PREFIX: str = "/api"
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = Field(default=8000, ge=1, le=65535)
     CORS_ALLOWED_ORIGINS: list[str] = Field(
         default_factory=lambda: [
@@ -142,6 +186,11 @@ class Settings(BaseSettings):
         extra="ignore",
         hide_input_in_errors=True,
     )
+
+    @field_validator("HOST", mode="before")
+    @classmethod
+    def normalize_host(cls, value: object) -> str:
+        return normalize_listen_host(value)
 
     @field_validator(
         "LOG_DIR",
@@ -378,9 +427,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "本版本不持久化网页正文，WEB_CONTENT_CACHE_ENABLED 必须为 false"
             )
-        if self.ENVIRONMENT.strip().casefold() == "production":
-            if not self.AUTH_REQUIRED:
-                raise ValueError("生产环境必须启用 AUTH_REQUIRED")
+        environment = self.ENVIRONMENT.strip().casefold()
+        if environment == "production" and not self.AUTH_REQUIRED:
+            raise ValueError("生产环境必须启用 AUTH_REQUIRED")
+        if not self.AUTH_REQUIRED and not is_explicit_loopback_host(self.HOST):
+            raise ValueError(
+                "AUTH_REQUIRED=false 仅允许明确的 loopback HOST；"
+                f"当前 HOST={self.HOST!r}。局域网、容器或反向代理监听必须启用认证"
+            )
+        if environment == "production":
             secret_names = (
                 "JWT_SECRET",
                 "METRICS_SCRAPE_TOKEN",

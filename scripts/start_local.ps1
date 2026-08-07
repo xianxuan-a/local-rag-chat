@@ -237,6 +237,7 @@ try {
     $env:BACKUP_DIR = Join-Path $context.runtime_root "backups"
     $env:EVALUATION_DIR = Join-Path $context.runtime_root "evaluations"
     $env:LOG_DIR = $logRoot
+    $env:HOST = "127.0.0.1"
     $env:PORT = [string]$BackendPort
     $env:DEBUG = "false"
     $env:CORS_ALLOWED_ORIGINS = ConvertTo-Json -Compress @(

@@ -38,6 +38,7 @@ def test_start_contract_is_real_atomic_and_rolls_back() -> None:
     common = _text(SCRIPTS / "local_runtime.ps1")
 
     assert '"dev:real"' in start
+    assert '$env:HOST = "127.0.0.1"' in start
     assert "$env:VITE_API_MODE = \"real\"" in start
     assert "dev:mock" not in start.casefold()
     assert "Stop-LocalServiceRecord" in start

@@ -30,6 +30,7 @@ def test_configured_directories_can_be_created(tmp_path: Path) -> None:
 def test_default_settings_values_are_valid() -> None:
     settings = Settings(_env_file=None, DASHSCOPE_API_KEY="")
 
+    assert settings.HOST == "127.0.0.1"
     assert settings.CHUNK_SIZE == 1000
     assert settings.CHUNK_OVERLAP == 200
     assert settings.RETRIEVAL_TOP_K == 5

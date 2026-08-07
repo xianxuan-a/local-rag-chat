@@ -12,6 +12,7 @@ from tests.conftest import make_test_settings
 
 def test_local_single_user_mode_allows_real_api_without_token(tmp_path) -> None:
     settings = make_test_settings(tmp_path, AUTH_REQUIRED=False)
+    assert settings.HOST == "127.0.0.1"
     settings.ensure_directories()
     upgrade_database(settings.DATABASE_URL)
 

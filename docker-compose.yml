@@ -11,7 +11,7 @@ services:
       context: .
       args:
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    command: ["python", "run.py"]
     environment:
       ENVIRONMENT: "production"
       AUTH_REQUIRED: "true"
