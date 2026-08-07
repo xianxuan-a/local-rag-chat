@@ -22,15 +22,47 @@ python -m venv .venv
 pip install -r requirements.txt
 Copy-Item .env.example .env
 python scripts/init_secrets.py --env-file .env
-alembic upgrade head
+Set-Location frontend
+npm ci
+Set-Location ..
+.\scripts\init_local_runtime.ps1 -RuntimeRoot "D:\local-rag-runtime"
 ```
+
+最后一条命令会在明确指定的目录创建数据库和
+`.local-rag-runtime.json`，并在项目根目录原子写入本机专用的
+`.local-rag-chat.json`。这些文件均被 Git 忽略。初始化器不会覆盖其他运行时，
+也不会在失败后批量删除文件。不要另外对项目默认 `data` 目录执行
+`alembic upgrade head`。
 
 ### Windows 本地启动
 
-双击 `启动项目.cmd` 会读取本机 `.local-rag-chat.json` 中固定的数据目录。
+双击 `启动项目.cmd`，或在 PowerShell 中执行 `./启动项目.cmd`，会读取本机
+`.local-rag-chat.json` 中固定的数据目录，并启动 FastAPI 与 Vue Real 开发服务器。
+默认访问地址为 `http://127.0.0.1:5173/`；启动成功后自动打开浏览器。
 启动器不会猜测、回退或自动切换到项目 `data` 目录。固定运行目录还必须包含
 匹配的 `.local-rag-runtime.json` 身份文件；配置缺失或身份不一致时拒绝启动，
 避免代码升级后误连另一套空库。
+
+三个根目录入口都可从任意当前目录调用，路径含中文或空格也无需修改：
+
+```powershell
+./启动项目.cmd                 # 启动 Vue Real + FastAPI
+./查看状态.cmd                 # 完整运行返回 0；停止/陈旧返回 3；检查错误返回 1
+./停止项目.cmd                 # 正常停止和重复停止都返回 0
+```
+
+自动化或排错时可绕过 CMD 薄包装，直接调用同一套 PowerShell 核心逻辑：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1 -NoBrowser
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\status_local.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop_local.ps1
+```
+
+停止入口只处理状态文件中项目根目录、运行时身份、PID、启动时间、可执行文件和
+命令行全部匹配的进程。状态陈旧或 PID 已复用时会跳过该进程，绝不按端口强杀。
+启动期间若前端失败，已启动的后端会自动回滚，临时状态不会冒充“运行中”。
+状态写入采用同目录原子替换，并发启动/停止通过项目级互斥锁串行化。
 
 启动器会检查 SQLite Schema 版本；版本落后时显示迁移范围并等待确认。确认后，
 先在固定运行目录的 `backups/startup-migrations` 保留独立数据库备份，再迁移
@@ -39,13 +71,26 @@ alembic upgrade head
 需要使用其他本地运行目录时，可通过参数指定：
 
 ```powershell
-.\启动项目.cmd -RuntimeRoot D:\local-rag-runtime
+./启动项目.cmd -RuntimeRoot "D:\local-rag-runtime"
 ```
 
 也可设置 `LOCAL_RAG_RUNTIME_ROOT` 或直接设置 `LOCAL_RAG_DATABASE`，显式参数
-优先于本机固定配置。自动化的
-本地环境可传入 `-AutoUpgrade` 跳过确认；生产环境仍应遵循下文的备份、恢复
+优先于本机固定配置。若启动时临时指定了另一运行时，查看状态和停止时也要传入
+相同参数；日常使用应通过初始化脚本更新固定配置。自动化的
+本地环境可传入 `-AutoUpgrade` 跳过确认，传入 `-NoBrowser` 可禁止自动打开浏览器。
+默认端口是后端 `8000`、前端 `5173`；需要与当前 Docker 栈并行验收时可使用：
+
+```powershell
+./启动项目.cmd -NoBrowser -BackendPort 18000 -FrontendPort 15173
+```
+
+再次启动时必须使用与当前状态相同的端口。日常使用建议在本地入口和 Docker
+入口之间二选一；Docker 正式入口仍是 `http://localhost:8501`。
+生产环境仍应遵循下文的备份、恢复
 演练和停机切换流程，不应使用本地启动器自动升级。
+
+启动日志位于固定运行目录的 `logs`。失败信息会给出该目录和修正建议；命令行
+调用不会被 `pause` 阻塞，只有从资源管理器双击且发生错误时才等待用户确认。
 
 在 `.env` 中显式配置 `DASHSCOPE_API_KEY`、`CHAT_MODEL` 及 Embedding 参数。生产环境缺少 `JWT_SECRET`、`METRICS_SCRAPE_TOKEN`、`BACKUP_SIGNING_KEY` 或 `BOOTSTRAP_SECRET` 时会快速失败。
 
@@ -59,12 +104,8 @@ Remove-Item Env:BOOTSTRAP_ADMIN_PASSWORD
 
 也可在首次启动后调用一次 `POST /api/auth/bootstrap`，并提供 `X-Bootstrap-Secret`。成功后该入口拒绝重复初始化。
 
-```powershell
-python run.py
-streamlit run ui/streamlit_app.py
-```
-
-Swagger 位于 `http://localhost:8000/docs`。Streamlit 只通过 HTTP 访问后端。
+Swagger 位于 `http://localhost:8000/docs`。根入口不启动 Mock 或 Streamlit；
+Mock 只用于下节的显式前端开发命令，Streamlit 只保留在 Docker `legacy` profile。
 
 ## Vue 前端与 Real/Mock 边界
 
@@ -73,7 +114,7 @@ Mock，也不会在前端伪造持久化、Job 进度或流式回答。
 
 ```powershell
 Set-Location frontend
-npm install
+npm ci
 npm run dev:real   # VITE_API_MODE=real，默认连接 http://127.0.0.1:8000
 npm run dev:mock   # VITE_API_MODE=mock，仅使用隔离的内存 Mock Service
 ```
