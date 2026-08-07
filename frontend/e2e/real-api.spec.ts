@@ -149,7 +149,7 @@ test.describe('Real API phase one', () => {
 
     await page.reload()
     await expect(page).toHaveURL(sessionUrl)
-    await expect(page.getByText('隔离环境中的确定性回答 [S1]').last()).toBeVisible()
+    await expect(page.getByText('隔离环境中的确定性回答 [K1]').last()).toBeVisible()
     const restoredAnswer = page
       .locator('.message:not(.message-user)')
       .filter({ hasText: '隔离环境中的确定性回答' })
@@ -167,17 +167,42 @@ test.describe('Real API phase one', () => {
     ).toHaveCount(1)
 
     await composer.fill('请生成一段可以停止的回答')
+    const cancelResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/cancel') && response.request().method() === 'POST',
+      { timeout: 15_000 },
+    )
+    /* eslint-disable @typescript-eslint/no-unsafe-call -- browser DOM callback */
+    await page.evaluate(() => {
+      const startedAt = performance.now()
+      const clickWhenVisible = (): void => {
+        const button = document.querySelector<HTMLButtonElement>(
+          'button[aria-label="停止生成"]',
+        )
+        if (
+          button !== null &&
+          !button.disabled &&
+          window.getComputedStyle(button).display !== 'none'
+        ) {
+          button.click()
+          return
+        }
+        if (performance.now() - startedAt < 10_000) {
+          window.requestAnimationFrame(clickWhenVisible)
+        }
+      }
+      window.requestAnimationFrame(clickWhenVisible)
+    })
+    /* eslint-enable @typescript-eslint/no-unsafe-call */
     await page.getByRole('button', { name: '发送问题' }).click()
-    await expect(page.getByRole('button', { name: '停止生成' })).toBeVisible()
-    await page.waitForTimeout(450)
-    await page.getByRole('button', { name: '停止生成' }).click()
+    expect((await cancelResponse).status()).toBe(200)
     await expect(page.getByText('已停止生成').last()).toBeVisible({
       timeout: 15_000,
     })
 
     await composer.fill('触发模型失败')
     await page.getByRole('button', { name: '发送问题' }).click()
-    await expect(page.getByText('模型请求失败').last()).toBeVisible({
+    await expect(page.getByText('模型服务不可用').last()).toBeVisible({
       timeout: 15_000,
     })
 
@@ -249,7 +274,7 @@ test.describe('Real API phase one', () => {
     await expect(ragRun.getByLabel('状态：成功')).toBeVisible({
       timeout: 20_000,
     })
-    await expect(page.getByText('隔离环境中的确定性回答 [S1]')).toBeVisible()
+    await expect(page.getByText('隔离环境中的确定性回答 [K1]')).toBeVisible()
 
     await page.goto('/dashboard')
     await expect(page.getByRole('heading', { name: '系统总览' })).toBeVisible()
@@ -344,7 +369,7 @@ test.describe('Real API phase one', () => {
     await page.goto('/knowledge-bases')
     await expect(
       page.getByText('后端服务不可达，请检查 FastAPI 是否已启动。'),
-    ).toBeVisible()
+    ).toBeVisible({ timeout: 20_000 })
     await expect(page.getByText('产品知识中台')).toHaveCount(0)
   })
 })

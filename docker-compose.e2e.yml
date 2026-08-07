@@ -1,0 +1,14 @@
+services:
+  backend:
+    command: ["uvicorn", "tests.real_api_integration_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    environment:
+      NEXUS_REAL_API_ARTIFACT_ROOT: "/app/data/real-api-e2e"
+      DATA_DIR: "/app/data/real-api-e2e/data"
+      DATABASE_URL: "sqlite:////app/data/real-api-e2e/data/metadata/integration.db"
+    volumes:
+      - ./tests:/app/tests:ro
+
+  migrate:
+    environment:
+      DATA_DIR: "/app/data/real-api-e2e/data"
+      DATABASE_URL: "sqlite:////app/data/real-api-e2e/data/metadata/integration.db"

@@ -65,6 +65,20 @@ describe('HttpClient', () => {
     expect(result.headers.get('X-Request-ID')).toBe('request-1')
   })
 
+  it('resolves a root-relative base URL against the browser origin', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(response({ code: 0, message: 'success', data: {} }))
+    const client = new HttpClient({ ...config, baseUrl: '/' }, { fetcher })
+
+    await client.request('/api/settings')
+
+    const input = fetcher.mock.calls[0]?.[0]
+    expect(input === undefined ? '' : requestUrl(input)).toBe(
+      `${window.location.origin}/api/settings`,
+    )
+  })
+
   it('sends FormData without setting a multipart Content-Type boundary', async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -122,6 +136,7 @@ describe('HttpClient', () => {
       code: 'HTTP_502',
       status: 502,
       kind: 'http',
+      message: '后端服务不可达，请检查 FastAPI 是否已启动。',
     })
   })
 

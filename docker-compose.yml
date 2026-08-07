@@ -9,9 +9,12 @@ services:
     image: local-rag-chat:0.1.0
     build:
       context: .
+      args:
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     environment:
       ENVIRONMENT: "production"
+      AUTH_REQUIRED: "true"
       HOST: "0.0.0.0"
       PORT: "8000"
       DATA_DIR: "/app/data"
@@ -58,8 +61,11 @@ services:
       METRICS_SCRAPE_TOKEN: "${METRICS_SCRAPE_TOKEN:?METRICS_SCRAPE_TOKEN is required}"
       BACKUP_SIGNING_KEY: "${BACKUP_SIGNING_KEY:?BACKUP_SIGNING_KEY is required}"
       BOOTSTRAP_SECRET: "${BOOTSTRAP_SECRET:?BOOTSTRAP_SECRET is required}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - local-rag-data:/app/data
     healthcheck:
@@ -71,15 +77,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 30s
     restart: unless-stopped
     logging: *default-logging
 
   migrate:
     image: local-rag-chat:0.1.0
-    profiles: ["tools"]
-    command: ["alembic", "upgrade", "head"]
+    command: ["python", "scripts/run_migrations.py"]
     environment:
+      DATA_DIR: "/app/data"
       DATABASE_URL: "sqlite:////app/data/metadata/local_rag_chat.db"
     volumes:
       - local-rag-data:/app/data
@@ -87,6 +93,29 @@ services:
     logging: *default-logging
 
   frontend:
+    image: local-rag-chat-frontend:0.1.0
+    build:
+      context: ./frontend
+      args:
+        VITE_API_MODE: "real"
+        VITE_API_BASE_URL: "/"
+        VITE_API_TIMEOUT_MS: "${VITE_API_TIMEOUT_MS:-15000}"
+    ports:
+      - "${FRONTEND_PORT:-8501}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+
+  legacy-ui:
+    profiles: ["legacy"]
     image: local-rag-chat:0.1.0
     command:
       - streamlit
@@ -100,7 +129,7 @@ services:
       API_BASE_URL: "http://backend:8000"
       API_TIMEOUT_SECONDS: "5"
     ports:
-      - "8501:8501"
+      - "${LEGACY_UI_PORT:-8502}:8501"
     depends_on:
       backend:
         condition: service_healthy

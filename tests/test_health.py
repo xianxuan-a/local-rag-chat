@@ -1,9 +1,13 @@
 """Application startup and health response tests."""
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect
 from uuid import UUID
+
+from app.main import create_app
+from tests.conftest import make_test_settings
 
 
 def test_health_returns_uniform_success(client: TestClient) -> None:
@@ -27,13 +31,26 @@ def test_live_and_ready_have_distinct_semantics(client: TestClient) -> None:
     assert ready.json()["data"]["status"] == "ready"
     assert ready.json()["data"]["checks"] == {
         "sqlite": "ok",
+        "migration": "ok",
+        "log_dir": "ok",
         "data_dir": "ok",
         "upload_dir": "ok",
         "chroma_dir": "ok",
         "metadata_dir": "ok",
+        "chat_history_dir": "ok",
+        "backup_dir": "ok",
+        "evaluation_dir": "ok",
         "chroma": "ok",
         "job_worker": "ok",
     }
+
+
+def test_unmigrated_database_never_serves_ready(tmp_path) -> None:
+    settings = make_test_settings(tmp_path)
+
+    with pytest.raises(RuntimeError, match="数据库 Schema 未就绪"):
+        with TestClient(create_app(settings)):
+            raise AssertionError("unmigrated application unexpectedly started")
 
 
 def test_request_id_is_validated_and_returned(client: TestClient) -> None:

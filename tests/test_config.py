@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from app.core.config import PROJECT_ROOT, Settings, get_settings
 from tests.conftest import make_test_settings
 
@@ -56,3 +58,61 @@ def test_legacy_chat_model_sentinel_is_treated_as_unconfigured() -> None:
 
     assert settings.CHAT_MODEL is None
     assert settings.missing_chat_configuration() == ("CHAT_MODEL",)
+
+
+def _production_secrets() -> dict[str, str]:
+    return {
+        "JWT_SECRET": "j" * 32,
+        "METRICS_SCRAPE_TOKEN": "m" * 32,
+        "BACKUP_SIGNING_KEY": "b" * 32,
+        "BOOTSTRAP_SECRET": "s" * 32,
+    }
+
+
+def test_production_auth_with_strong_secrets_is_valid() -> None:
+    settings = Settings(
+        _env_file=None,
+        ENVIRONMENT="production",
+        AUTH_REQUIRED=True,
+        **_production_secrets(),
+    )
+
+    assert settings.ENVIRONMENT == "production"
+    assert settings.AUTH_REQUIRED is True
+
+
+def test_production_missing_secret_fails_without_leaking_values() -> None:
+    secrets = _production_secrets()
+    exposed_value = secrets["JWT_SECRET"]
+    secrets["BOOTSTRAP_SECRET"] = ""
+
+    with pytest.raises(ValueError) as error:
+        Settings(
+            _env_file=None,
+            ENVIRONMENT="production",
+            AUTH_REQUIRED=True,
+            **secrets,
+        )
+
+    message = str(error.value)
+    assert "BOOTSTRAP_SECRET" in message
+    assert exposed_value not in message
+
+
+def test_production_weak_secret_fails_without_leaking_values() -> None:
+    secrets = _production_secrets()
+    weak_value = "weak-secret"
+    secrets["JWT_SECRET"] = weak_value
+
+    with pytest.raises(ValueError) as error:
+        Settings(
+            _env_file=None,
+            ENVIRONMENT="production",
+            AUTH_REQUIRED=True,
+            **secrets,
+        )
+
+    message = str(error.value)
+    assert "JWT_SECRET" in message
+    assert "至少 32 UTF-8 bytes" in message
+    assert weak_value not in message

@@ -8,6 +8,10 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: '@/api/loginMode',
+        replacement: path.resolve(import.meta.dirname, './src/api/loginModeMock.ts'),
+      },
+      {
         find: '@/api/adapters/runtimeAdapter',
         replacement: path.resolve(
           import.meta.dirname,

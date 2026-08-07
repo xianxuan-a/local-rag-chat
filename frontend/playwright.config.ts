@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
+const externalBaseUrl = process.env.NEXUS_E2E_BASE_URL?.replace(/\/$/u, '')
+
 export default defineConfig({
   testDir: './e2e',
   outputDir: `./artifacts/playwright-results/run-${Date.now()}`,
@@ -12,7 +14,7 @@ export default defineConfig({
   retries: 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: externalBaseUrl ?? 'http://127.0.0.1:4173',
     channel: 'chrome',
     headless: true,
     launchOptions: {
@@ -31,14 +33,16 @@ export default defineConfig({
       },
     },
   ],
-  webServer: {
-    command: 'npm run preview -- --host 127.0.0.1',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: true,
-    timeout: 30_000,
-    env: {
-      VITE_API_MODE: 'mock',
-      VITE_MOCK_DELAY_SCALE: '0.05',
-    },
-  },
+  webServer: externalBaseUrl
+    ? undefined
+    : {
+        command: 'npm run preview -- --host 127.0.0.1',
+        url: 'http://127.0.0.1:4173',
+        reuseExistingServer: true,
+        timeout: 30_000,
+        env: {
+          VITE_API_MODE: 'mock',
+          VITE_MOCK_DELAY_SCALE: '0.05',
+        },
+      },
 })

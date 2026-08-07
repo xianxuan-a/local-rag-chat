@@ -1,6 +1,9 @@
 .git
 .gitignore
+.gitattributes
+.idea
 .env
+.local-rag-chat.json
 .venv
 venv
 env
@@ -13,12 +16,9 @@ __pycache__
 .coverage
 htmlcov
 logs
-data/uploads/*
-data/chroma/*
-data/metadata/*
-data/chat_history/*
-data/backups/*
-data/evaluations/*
+data
+artifacts
+frontend
 tests
 *.png
 *.db

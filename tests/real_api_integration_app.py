@@ -29,6 +29,9 @@ artifact_root = Path(artifact_root_value).resolve()
 data_dir = artifact_root / "data"
 settings = Settings(
     _env_file=None,
+    ENVIRONMENT="production",
+    AUTH_REQUIRED=True,
+    ALLOW_REGISTRATION=False,
     LOG_DIR=artifact_root / "logs",
     DATA_DIR=data_dir,
     UPLOAD_DIR=data_dir / "uploads",
@@ -40,9 +43,9 @@ settings = Settings(
     DATABASE_URL=f"sqlite:///{(data_dir / 'metadata' / 'integration.db').as_posix()}",
     MAX_UPLOAD_SIZE_MB=1,
     JWT_SECRET="isolated-real-api-jwt-secret-for-browser-tests",
-    METRICS_SCRAPE_TOKEN="isolated-real-api-metrics-token",
-    BACKUP_SIGNING_KEY="isolated-real-api-backup-key",
-    BOOTSTRAP_SECRET="isolated-real-api-bootstrap-secret",
+    METRICS_SCRAPE_TOKEN="isolated-real-api-metrics-token-for-browser-tests",
+    BACKUP_SIGNING_KEY="isolated-real-api-backup-key-for-browser-tests",
+    BOOTSTRAP_SECRET="isolated-real-api-bootstrap-secret-for-browser-tests",
     CHAT_MODEL="isolated-deterministic-chat",
     DASHSCOPE_API_KEY=SecretStr("isolated-deterministic-key"),
 )
@@ -119,7 +122,7 @@ def deterministic_chat(**kwargs: Any):
         )
         for chunk in chunks:
             if "可以停止" in prompt:
-                time.sleep(0.35)
+                time.sleep(1.0)
             yield _chat_response(chunk)
 
     return generate()
@@ -127,3 +130,10 @@ def deterministic_chat(**kwargs: Any):
 
 chat_model_service.Generation.call = deterministic_chat
 app = app_main.create_app(settings)
+
+
+@app.get("/api/_test/error")
+def deterministic_internal_error() -> None:
+    """Expose a test-only 500 to verify proxy status preservation."""
+
+    raise RuntimeError("deterministic integration failure")

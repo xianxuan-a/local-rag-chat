@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import KnowledgeStarMap from '@/components/auth/KnowledgeStarMap.vue'
 import { apiConfig } from '@/api/client'
+import { loginModePresentation } from '@/api/loginMode'
 import { safeInternalRedirect } from '@/router'
 import { useAuthStore } from '@/stores/auth'
 import { AppError } from '@/types'
@@ -36,7 +37,6 @@ const passwordError = ref('')
 const formMessage = ref('')
 const formMessageKind = ref<'error' | 'info'>('error')
 
-const isMockMode = apiConfig.mode === 'mock'
 const isSubmitting = computed(() => authStore.status === 'submitting')
 const passwordType = computed(() => (showPassword.value ? 'text' : 'password'))
 const passwordToggleLabel = computed(() =>
@@ -124,9 +124,9 @@ async function handleSubmit(): Promise<void> {
   formMessage.value = ''
   if (!validateForm()) return
 
-  if (isMockMode) {
+  if (loginModePresentation.submitMessage !== null) {
     formMessageKind.value = 'info'
-    formMessage.value = 'Mock 模式不执行身份认证，也不会发送或保存这些凭证。'
+    formMessage.value = loginModePresentation.submitMessage
     await animateMessage()
     return
   }
@@ -222,7 +222,9 @@ onBeforeUnmount(() => {
           <div class="login-card-heading" data-login-intro>
             <div class="login-kicker-row">
               <p>账户登录</p>
-              <span v-if="isMockMode" class="login-mode-badge">MOCK MODE</span>
+              <span v-if="loginModePresentation.badge" class="login-mode-badge">
+                {{ loginModePresentation.badge }}
+              </span>
             </div>
             <h1 id="login-title">欢迎回来</h1>
           </div>
@@ -326,18 +328,19 @@ onBeforeUnmount(() => {
             <span>安全边界</span>
             <div>
               <span class="login-passkey-mark" aria-hidden="true"></span>
-              <strong v-if="isMockMode">Mock 模式不会发出认证请求</strong>
-              <strong v-else>凭证仅发送至本地认证服务</strong>
+              <strong>{{ loginModePresentation.securityMessage }}</strong>
             </div>
           </div>
 
           <div class="login-card-footer" data-login-intro>
-            <template v-if="isMockMode">
-              <span>无需认证即可使用演示数据</span>
-              <RouterLink to="/dashboard">进入工作区</RouterLink>
+            <template v-if="loginModePresentation.workspaceLinkLabel">
+              <span>{{ loginModePresentation.footerLabel }}</span>
+              <RouterLink to="/dashboard">
+                {{ loginModePresentation.workspaceLinkLabel }}
+              </RouterLink>
             </template>
             <template v-else>
-              <span>需要账户？</span>
+              <span>{{ loginModePresentation.footerLabel }}</span>
               <strong>请联系系统管理员</strong>
             </template>
           </div>

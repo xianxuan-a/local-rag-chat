@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-*
+.vite
+artifacts
+coverage
+test-results
+e2e
+**/*.spec.ts
+**/*.test.ts
+.git
+.gitignore
+README.md

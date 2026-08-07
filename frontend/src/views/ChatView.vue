@@ -389,21 +389,62 @@ async function sendQuestion(question = input.value.trim()): Promise<void> {
 async function stopGeneration(): Promise<void> {
   const target = generationTarget.value
   const controller = generationController.value
-  if (
-    stopping.value ||
-    target === null ||
-    target.assistantMessageId === null ||
-    controller === null
-  ) {
+  if (stopping.value || target === null || controller === null) {
     return
   }
   stopping.value = true
   try {
-    await chatApi.cancel(
-      target.sessionId,
-      target.assistantMessageId,
-      target.knowledgeBaseId,
-    )
+    let assistantMessageId = target.assistantMessageId
+    if (assistantMessageId === null) {
+      for (let attempt = 0; attempt < 20 && assistantMessageId === null; attempt += 1) {
+        const latestMessages = await sessionApi.getMessages(
+          target.sessionId,
+          target.knowledgeBaseId,
+          { limit: 200, offset: 0 },
+        )
+        assistantMessageId =
+          [...latestMessages]
+            .reverse()
+            .find(
+              (message) =>
+                message.role === 'assistant' && message.status === 'streaming',
+            )?.id ?? null
+        if (assistantMessageId === null) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 50))
+        }
+      }
+      if (assistantMessageId === null) return
+      if (generationTarget.value !== null) {
+        generationTarget.value.assistantMessageId = assistantMessageId
+      }
+      if (streamDraft.value !== undefined) {
+        streamDraft.value.assistantMessageId = assistantMessageId
+      }
+    }
+    await chatApi.cancel(target.sessionId, assistantMessageId, target.knowledgeBaseId)
+    controller.abort()
+    let latestMessages: ChatMessage[] = []
+    for (let attempt = 0; attempt < 75; attempt += 1) {
+      latestMessages = await sessionApi.getMessages(
+        target.sessionId,
+        target.knowledgeBaseId,
+        { limit: 200, offset: 0 },
+      )
+      const cancelledAssistant = latestMessages.find(
+        (message) => message.id === assistantMessageId,
+      )
+      if (cancelledAssistant?.status !== 'streaming') break
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 200))
+    }
+    if (matchesCurrentContext(target.sessionId, target.knowledgeBaseId)) {
+      messages.value = latestMessages
+      currentSources.value =
+        [...latestMessages]
+          .reverse()
+          .find((message) => message.role === 'assistant' && message.sources.length > 0)
+          ?.sources ?? []
+      await scrollToBottom()
+    }
   } catch (caught) {
     if (!isAbortError(caught)) toast.error(getErrorMessage(caught))
   } finally {
@@ -756,7 +797,7 @@ onBeforeUnmount(() => {
           v-model:mode="selectedMode"
           :generating="generating"
           :stopping="stopping"
-          :stop-disabled="(generationTarget?.assistantMessageId ?? null) === null"
+          :stop-disabled="false"
           :disabled="chatUnavailableReason.length > 0"
           :disabled-reason="chatUnavailableReason"
           :knowledge-base-name="currentKnowledgeBaseName"

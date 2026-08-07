@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.response import error_response, success_response
+from app.database.migrations import verify_database_at_head
 from app.database.sqlite import get_db
 from app.services.runtime_coordinator import (
     RuntimeCoordinator,
@@ -46,11 +47,24 @@ def ready(
     except Exception:
         checks["sqlite"] = "failed"
         failures.append("sqlite")
+    try:
+        engine = getattr(request.app.state, "engine", None)
+        if engine is None:
+            raise RuntimeError("database engine is not initialized")
+        verify_database_at_head(engine)
+        checks["migration"] = "ok"
+    except Exception:
+        checks["migration"] = "failed"
+        failures.append("migration")
     for label, path in (
+        ("log_dir", settings.LOG_DIR),
         ("data_dir", settings.DATA_DIR),
         ("upload_dir", settings.UPLOAD_DIR),
         ("chroma_dir", settings.CHROMA_DIR),
         ("metadata_dir", settings.METADATA_DIR),
+        ("chat_history_dir", settings.CHAT_HISTORY_DIR),
+        ("backup_dir", settings.BACKUP_DIR),
+        ("evaluation_dir", settings.EVALUATION_DIR),
     ):
         if path.is_dir() and os.access(path, os.R_OK | os.W_OK):
             checks[label] = "ok"

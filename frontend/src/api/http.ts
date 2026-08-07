@@ -60,7 +60,18 @@ function backendErrorFrom(value: unknown): BackendErrorEnvelope {
 
 function safeUrl(baseUrl: string, path: string): URL {
   const normalizedPath = path.replace(/^\/+/, '')
-  return new URL(normalizedPath, `${baseUrl.replace(/\/+$/, '')}/`)
+  const resolvedBase = baseUrl.startsWith('/')
+    ? new URL(baseUrl, window.location.origin).href
+    : baseUrl
+  return new URL(normalizedPath, `${resolvedBase.replace(/\/+$/, '')}/`)
+}
+
+function responseErrorMessage(status: number, backendMessage: string | null): string {
+  if (backendMessage) return backendMessage
+  if (status === 502 || status === 504) {
+    return '后端服务不可达，请检查 FastAPI 是否已启动。'
+  }
+  return `请求失败（HTTP ${status}）。`
 }
 
 export class HttpClient {
@@ -207,7 +218,7 @@ export class HttpClient {
       const backendError = backendErrorFrom(parsed)
       throw new AppError(
         backendError.code ?? `HTTP_${response.status}`,
-        backendError.message ?? `请求失败（HTTP ${response.status}）。`,
+        responseErrorMessage(response.status, backendError.message),
         null,
         {
           status: response.status,
@@ -306,7 +317,7 @@ export class HttpClient {
         const backendError = backendErrorFrom(parsed)
         throw new AppError(
           backendError.code ?? `HTTP_${response.status}`,
-          backendError.message ?? `请求失败（HTTP ${response.status}）。`,
+          responseErrorMessage(response.status, backendError.message),
           null,
           {
             status: response.status,

@@ -30,8 +30,26 @@ describe('API configuration and adapter selection', () => {
     { VITE_API_MODE: 'real' },
     { VITE_API_MODE: 'real', VITE_API_BASE_URL: 'not-a-url' },
     { VITE_API_MODE: 'real', VITE_API_BASE_URL: 'file:///tmp/api' },
+    { VITE_API_MODE: 'real', VITE_API_BASE_URL: '//untrusted.example' },
+    { VITE_API_MODE: 'real', VITE_API_BASE_URL: '/?token=unsafe' },
+    { VITE_API_MODE: 'real', VITE_API_BASE_URL: '/#unsafe' },
   ])('rejects an invalid Real API base URL', (env) => {
     expect(() => parseApiConfig(env)).toThrowError(AppError)
+  })
+
+  it('accepts and normalizes safe root-relative Real API base URLs', () => {
+    expect(
+      parseApiConfig({
+        VITE_API_MODE: 'real',
+        VITE_API_BASE_URL: '/gateway/',
+      }),
+    ).toMatchObject({ mode: 'real', baseUrl: '/gateway' })
+    expect(
+      parseApiConfig({
+        VITE_API_MODE: 'real',
+        VITE_API_BASE_URL: '/',
+      }),
+    ).toMatchObject({ mode: 'real', baseUrl: '/' })
   })
 
   it('does not require a reachable base URL in Mock mode', () => {

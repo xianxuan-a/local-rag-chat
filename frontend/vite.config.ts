@@ -16,14 +16,23 @@ export default defineConfig(({ mode }) => {
       ? './src/api/adapters/mockRuntimeAdapter.ts'
       : './src/api/adapters/realRuntimeAdapter.ts',
   )
+  const loginMode = path.resolve(
+    import.meta.dirname,
+    apiMode === 'mock' ? './src/api/loginModeMock.ts' : './src/api/loginModeReal.ts',
+  )
   return {
     plugins: [vue(), tailwindcss()],
     build: {
       outDir: apiMode === 'mock' ? 'dist-mock' : 'dist-real',
       emptyOutDir: false,
+      manifest: true,
     },
     resolve: {
       alias: [
+        {
+          find: '@/api/loginMode',
+          replacement: loginMode,
+        },
         {
           find: '@/api/adapters/runtimeAdapter',
           replacement: runtimeAdapter,

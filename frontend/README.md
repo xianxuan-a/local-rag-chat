@@ -33,7 +33,9 @@ VITE_API_BASE_URL=http://127.0.0.1:8000
 VITE_API_TIMEOUT_MS=15000
 ```
 
-`VITE_API_MODE` 必须明确为 `mock` 或 `real`；非法或缺失会直接报配置错误。Real 模式请求失败时不会加载或回退 Mock。前端可见的 `VITE_*` 变量不得保存 Secret。
+`VITE_API_MODE` 必须明确为 `mock` 或 `real`；非法或缺失会直接报配置错误。Real 模式请求失败时不会加载或回退 Mock。`VITE_API_BASE_URL` 接受绝对 HTTP(S) 地址或安全的单斜杠根相对路径；拒绝 `//host`、凭据、query 和 fragment。前端可见的 `VITE_*` 变量不得保存 Secret。
+
+`dev:real` 继续使用 `.env.real` 的 `http://127.0.0.1:8000`。`build:real` 则固定以同源 `/` 构建，适用于仓库中的 Nginx 代理；可通过 `npm run audit:real` 扫描 manifest 当前模块图，确认正式包不包含 Mock 标识、fixtures、Mock 上传路径或本地开发 API 地址。
 
 Mock 变更只存在于当前页面运行内存中。刷新页面后会恢复固定 ID、固定时间和固定排序的种子数据，不使用 `localStorage` 假装持久化，也不会发出真实业务网络请求。
 
@@ -55,15 +57,17 @@ npm run lint
 npm run lint:colors
 npm run format:check
 npm run test:unit
-npm run build
+npm run build:real
+npm run audit:real
+npm run build:mock
 npm run test:e2e
 ```
 
-`test:e2e` 使用 `vite preview` 检查构建产物。视觉 QA 截图保存在 `artifacts/visual-qa/`。
+默认 `test:e2e` 使用 `vite preview` 检查 Mock 构建。设置 `NEXUS_E2E_BASE_URL` 后不会启动 preview，而是直接测试指定的已部署入口；容器 Real 验收由根目录 `tests/test_frontend_compose_e2e.py` 编排。视觉 QA 截图保存在 `artifacts/visual-qa/`。
 
 ## 路由部署
 
-应用使用 Vue Router History 模式。生产静态服务器必须将 `/dashboard`、`/chat` 等未知文件路径回退到 `index.html`，否则刷新子路由会返回服务器 404。
+应用使用 Vue Router History 模式。仓库 `nginx.conf` 将 `/dashboard`、`/chat` 等未知文件路径回退到 no-cache 的 `index.html`，但 `/api` 与 `/api/*` 始终代理 FastAPI，永不进入 SPA fallback。`/assets/` 使用一年 immutable 缓存；Chat NDJSON stream/retry 路由禁用代理 buffering、request buffering 和 gzip。Nginx 502/504 且没有后端 JSON envelope 时，客户端显示真实“后端服务不可达”错误，不会切换 Mock。
 
 ## Real API 维护点
 
@@ -77,4 +81,4 @@ npm run test:e2e
 - `src/api/authApi.ts`：登录和当前用户的严格 API 契约。
 - `src/stores/auth.ts`：运行期认证状态，不保存明文密码。
 
-Dashboard、索引和评测仍未接入 Real API，调用时会明确返回“该功能尚未在本阶段接入 Real API”。Settings、Retrieval、Sessions 和 Chat 已使用服务器持久化状态；流式停止后会重新读取历史，重试会原位替换助手消息，Real 请求失败不会回退 Mock。
+Dashboard、知识库、文件、Settings、Retrieval、Sessions、Chat、索引和评测均使用 Real Adapter 的服务器状态；流式停止后会重新读取历史，重试会原位替换助手消息，Real 请求失败不会回退 Mock。

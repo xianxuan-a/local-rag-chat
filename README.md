@@ -78,10 +78,11 @@ npm run dev:real   # VITE_API_MODE=real，默认连接 http://127.0.0.1:8000
 npm run dev:mock   # VITE_API_MODE=mock，仅使用隔离的内存 Mock Service
 ```
 
-生产构建同样显式区分：
+生产构建同样显式区分。`build:real` 固定使用同源 `/`，不会把本地开发地址写入产物：
 
 ```powershell
 npm run build:real
+npm run audit:real
 npm run build:mock
 ```
 
@@ -297,29 +298,86 @@ python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --toke
 
 ## Docker
 
-Compose 固定 backend `workers=1`，生产 Secret 使用 `${NAME:?required}` 快速失败。先初始化 Secret，再显式运行迁移工具 profile，最后启动：
+Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 同时固定 backend `workers=1` 和 `AUTH_REQUIRED=true`。生产环境不能以免认证模式启动；四个生产 Secret 均为必填且至少 32 UTF-8 bytes，Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失值，应用配置模型继续负责认证和 Secret 强度校验。
+
+首次部署先从示例生成本机 `.env`，不要把生成后的值提交到仓库：
 
 ```powershell
-docker compose build
-docker compose --profile tools run --rm migrate
-docker compose up -d
+Copy-Item .env.example .env
+python scripts/init_secrets.py --env-file .env
 ```
 
-停止时使用 `docker compose down`。不要附加 `-v`，否则会删除持久卷。
+标准启动会自动运行一次性 `migrate` 服务。迁移入口与 API 取得同一个实例锁，避免对同一 SQLite 并发迁移；只有迁移成功后 backend 才会启动。backend 随后再次校验数据库 revision，迁移失败不会出现假健康服务：
+
+```powershell
+docker compose config -q
+docker compose build --no-cache backend frontend
+docker compose up -d
+docker compose ps
+Invoke-WebRequest http://localhost:8501/healthz
+Invoke-WebRequest http://localhost:8000/health/live
+Invoke-WebRequest http://localhost:8000/health/ready
+```
+
+默认构建源为官方 PyPI。受限网络可在 `.env` 中设置 `PIP_INDEX_URL` 为组织批准的镜像；该值只影响镜像构建，不会写入应用运行配置。
+
+`/health/live` 只表示 FastAPI 进程存活；`/health/ready` 还会校验 SQLite、Alembic head、全部持久目录、Chroma 和 Job worker。前端 `/healthz` 只检查 Nginx/静态服务，启动顺序仍要求 backend healthy。主机端口可用 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT` 调整，容器内端口保持 8000/8080。
+
+Vue History 路由（例如 `/dashboard`、`/chat`、`/knowledge-bases`、`/settings`）都回退到 `index.html`，且使用 `no-cache`；带 hash 的 `/assets/` 使用一年 `immutable` 缓存和静态 gzip。`/api` 永不进入 SPA fallback，FastAPI 的 Bearer、`X-Request-ID`、JSON envelope 和 HTTP 状态码会原样穿过；Chat NDJSON 流与 retry 流关闭代理 buffering 和 gzip。
+
+Streamlit 作为兼容入口保留，但不参与默认启动。需要时单独启用 `legacy` profile，默认访问 `http://localhost:8502`：
+
+```powershell
+docker compose --profile legacy up -d legacy-ui
+```
+
+整套停止或重建容器时使用 `docker compose down`，随后再次执行 `docker compose up -d`；迁移是幂等的，命名卷会保留。版本升级前必须先停止旧 backend，否则 migrate 会因实例锁被占用而明确失败。不要附加 `-v`，否则会删除持久卷。
+
+故障排查：
+
+```powershell
+docker compose ps -a
+docker compose logs migrate
+docker compose logs backend
+docker compose logs frontend
+docker compose config --format json
+```
+
+- `variable is required`：`.env` 缺少生产 Secret；重新运行 `init_secrets.py` 只会补齐空值，不会替换已有值。
+- migrate 非零退出：backend 会保持未启动；先根据 migrate 日志修复数据库/卷权限或迁移问题，再重新 `docker compose up -d`。
+- backend 非零退出：检查生产认证、Secret 强度、数据库 revision 和实例锁日志，不要用 `AUTH_REQUIRED=false` 或 `ENVIRONMENT=development` 绕过。
+- backend 为 `unhealthy`：直接查看 `/health/ready` 返回的失败检查项和 backend 日志。
+
+本地 Python 开发仍沿用 `.env.example` 的 `ENVIRONMENT=development`、`AUTH_REQUIRED=false`；这一开发默认值不会覆盖 Compose 中固定的生产认证设置。
 
 ## 验证
 
 ```powershell
 pytest -q
 python -m compileall app scripts ui tests
+# 需要正在运行的 Docker daemon；测试只创建并清理唯一项目名下的新卷。
+$env:RUN_DOCKER_COMPOSE_SMOKE=1
+$env:COMPOSE_SMOKE_PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+pytest -q tests/test_compose_smoke.py
+Remove-Item Env:RUN_DOCKER_COMPOSE_SMOKE
+Remove-Item Env:COMPOSE_SMOKE_PIP_INDEX_URL
 Set-Location frontend
 npm run type-check
 npm run lint
 npm run lint:colors
 npm run test:unit
 npm run build:real
+npm run audit:real
 npm run build:mock
 npm run test:e2e
+```
+
+完整的容器 Real 浏览器验收使用唯一 Compose 项目与新卷，外部模型由测试专用确定性本地 provider 替换，其余 FastAPI、SQLite、Chroma、Job worker、NDJSON 代理和刷新持久化均为真实链路：
+
+```powershell
+$env:RUN_DOCKER_FRONTEND_E2E=1
+pytest -q tests/test_frontend_compose_e2e.py
+Remove-Item Env:RUN_DOCKER_FRONTEND_E2E
 ```
 
 普通测试不访问网络，真实 DashScope 测试默认跳过。Docker daemon、真实 `qwen3-max` 链路、容器重启持久化、在线备份和离线临时恢复需在具备对应环境与 Secret 后单独验收。

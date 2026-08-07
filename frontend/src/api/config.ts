@@ -40,6 +40,22 @@ export function parseApiConfig(env: Record<string, unknown>): ApiConfig {
   }
 
   const rawBaseUrl = readText(env, 'VITE_API_BASE_URL')
+  if (rawBaseUrl.startsWith('/') && !rawBaseUrl.startsWith('//')) {
+    const parsed = new URL(rawBaseUrl, 'https://nexus-rag.local')
+    if (parsed.search || parsed.hash) {
+      throw new AppError(
+        'API_CONFIG_BASE_URL_INVALID',
+        'Real 模式 API 相对路径不能包含查询参数或 fragment。',
+        null,
+        { kind: 'config' },
+      )
+    }
+    return {
+      mode: rawMode,
+      baseUrl: rawBaseUrl === '/' ? '/' : rawBaseUrl.replace(/\/+$/, ''),
+      timeoutMs,
+    }
+  }
   let parsed: URL
   try {
     parsed = new URL(rawBaseUrl)
@@ -55,11 +71,13 @@ export function parseApiConfig(env: Record<string, unknown>): ApiConfig {
     !rawBaseUrl ||
     !['http:', 'https:'].includes(parsed.protocol) ||
     parsed.username ||
-    parsed.password
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
   ) {
     throw new AppError(
       'API_CONFIG_BASE_URL_INVALID',
-      'Real 模式需要不含凭据的 HTTP(S) VITE_API_BASE_URL。',
+      'Real 模式需要不含凭据、查询和 fragment 的 HTTP(S) 或根相对 VITE_API_BASE_URL。',
       null,
       { kind: 'config' },
     )

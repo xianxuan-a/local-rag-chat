@@ -78,7 +78,7 @@ function onKeydown(event: KeyboardEvent): void {
           </label>
           <span class="badge badge-light">{{ knowledgeBaseName }}</span>
           <AppButton
-            v-if="generating"
+            v-show="generating"
             size="icon"
             :disabled="stopping || stopDisabled"
             :loading="stopping"
@@ -88,7 +88,7 @@ function onKeydown(event: KeyboardEvent): void {
             <Square :size="13" aria-hidden="true" />
           </AppButton>
           <AppButton
-            v-else
+            v-show="!generating"
             size="icon"
             variant="primary"
             :disabled="disabled || !modelValue.trim()"

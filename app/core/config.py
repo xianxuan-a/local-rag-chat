@@ -140,6 +140,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     @field_validator(
@@ -380,19 +381,32 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT.strip().casefold() == "production":
             if not self.AUTH_REQUIRED:
                 raise ValueError("生产环境必须启用 AUTH_REQUIRED")
+            secret_names = (
+                "JWT_SECRET",
+                "METRICS_SCRAPE_TOKEN",
+                "BACKUP_SIGNING_KEY",
+                "BOOTSTRAP_SECRET",
+            )
+            secret_values = {
+                name: getattr(self, name).get_secret_value()
+                for name in secret_names
+            }
             missing = [
-                name
-                for name in (
-                    "JWT_SECRET",
-                    "METRICS_SCRAPE_TOKEN",
-                    "BACKUP_SIGNING_KEY",
-                    "BOOTSTRAP_SECRET",
-                )
-                if not getattr(self, name).get_secret_value()
+                name for name, value in secret_values.items() if not value
             ]
             if missing:
                 raise ValueError(
                     "生产环境缺少显式 Secret：" + ", ".join(missing)
+                )
+            weak = [
+                name
+                for name, value in secret_values.items()
+                if len(value.encode("utf-8")) < 32
+            ]
+            if weak:
+                raise ValueError(
+                    "生产环境 Secret 强度不足（至少 32 UTF-8 bytes）："
+                    + ", ".join(weak)
                 )
         return self
 
