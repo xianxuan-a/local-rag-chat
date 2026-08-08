@@ -80,6 +80,11 @@ def test_dashboard_empty_snapshot_is_continuous_and_secret_safe(client) -> None:
         "missing_chat_configuration",
         "embedding_key_configured",
     }
+    assert snapshot["runtime"] == {
+        "chat_configured": False,
+        "missing_chat_configuration": ["CHAT_MODEL", "CHAT_CREDENTIAL"],
+        "embedding_key_configured": False,
+    }
 
     assert client.get(
         "/api/dashboard", params={"window_days": 31}

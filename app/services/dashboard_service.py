@@ -42,6 +42,10 @@ from app.services.runtime_coordinator import RuntimeCoordinator
 SectionValue = TypeVar("SectionValue")
 logger = get_logger(__name__)
 
+_PUBLIC_CHAT_CONFIGURATION_NAMES = {
+    "DASHSCOPE_API_KEY": "CHAT_CREDENTIAL",
+}
+
 
 class DashboardService:
     """Build one internally consistent Dashboard snapshot from persisted data."""
@@ -108,7 +112,10 @@ class DashboardService:
             section_errors,
         )
         effective = self.runtime.effective_settings()
-        missing_chat = list(effective.missing_chat_configuration())
+        missing_chat = [
+            _PUBLIC_CHAT_CONFIGURATION_NAMES.get(name, name)
+            for name in effective.missing_chat_configuration()
+        ]
         return DashboardResponse(
             generated_at=now,
             window_days=window_days,

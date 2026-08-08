@@ -50,6 +50,12 @@ def make_test_settings(root: Path, **overrides: object) -> Settings:
         "METRICS_SCRAPE_TOKEN": "test-metrics-token",
         "BACKUP_SIGNING_KEY": "test-backup-signing-key",
         "BOOTSTRAP_SECRET": "test-bootstrap-secret",
+        # Keep external-provider state independent from developer and runner
+        # environment variables. Tests that exercise providers opt in explicitly.
+        "DASHSCOPE_API_KEY": "",
+        "DASHSCOPE_BASE_URL": None,
+        "CHAT_MODEL": None,
+        "WEB_SEARCH_API_KEY": "",
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
