@@ -18,7 +18,7 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 ENV VITE_API_TIMEOUT_MS=${VITE_API_TIMEOUT_MS}
 
 RUN test "${VITE_API_MODE}" = "real" \
-    && npm run build:real \
+    && npm run build \
     && npm run audit:real \
     && rm /app/dist-real/.vite/manifest.json
 

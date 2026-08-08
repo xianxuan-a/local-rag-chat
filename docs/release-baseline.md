@@ -51,7 +51,7 @@ npm run type-check
 npm run lint
 npm run lint:colors
 npm run test:unit
-npm run build:real
+npm run build
 npm run audit:real
 npm run build:mock
 Set-Location ..

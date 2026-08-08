@@ -133,18 +133,22 @@ npm run dev:real   # VITE_API_MODE=real，默认连接 http://127.0.0.1:8000
 npm run dev:mock   # VITE_API_MODE=mock，仅使用隔离的内存 Mock Service
 ```
 
-生产构建同样显式区分。`build:real` 固定使用同源 `/`，不会把本地开发地址写入产物：
+标准生产构建 `npm run build` 固定等价于 Real 构建并使用同源 `/`，不会把本地开发地址写入产物。Mock 只能通过显式命令构建：
 
 ```powershell
-npm run build:real
+npm run build          # 标准入口：Real
 npm run audit:real
-npm run build:mock
+npm run build:mock     # 仅用于 Mock 开发/测试
+npm run ci:build       # CI：依次验证 Real 审计与显式 Mock 构建
 ```
+
+GitHub Actions 的 `Frontend build` 工作流在推送到 `main`、Pull Request 和手动触发时执行同一门禁；工作流只授予仓库内容读取权限。
 
 Real 配置见 `frontend/.env.real`，Mock 配置见
 `frontend/.env.mock`。两种模式不共享浏览器持久化状态，Mock 不注册网络
 拦截器。构建产物分别写入 `frontend/dist-real` 和
-`frontend/dist-mock`，构建过程不会批量清理已有目录。
+`frontend/dist-mock`。每次构建只清理自身模式的输出目录，并生成
+`build-meta.json`；其中 `build_mode`、`production_deployable` 和输出目录可供发布系统核验，未知或缺失模式会直接失败。
 
 ## P1 Dashboard
 
@@ -467,7 +471,7 @@ npm run type-check
 npm run lint
 npm run lint:colors
 npm run test:unit
-npm run build:real
+npm run build
 npm run audit:real
 npm run build:mock
 npm run test:e2e

@@ -10,6 +10,15 @@ export default defineConfig(({ mode }) => {
   if (apiMode !== 'mock' && apiMode !== 'real') {
     throw new Error('VITE_API_MODE must be explicitly set to mock or real')
   }
+  const outputDirectory = apiMode === 'mock' ? 'dist-mock' : 'dist-real'
+  const buildMetadata = {
+    schema_version: 1,
+    build_mode: apiMode,
+    api_mode: apiMode,
+    production_deployable: apiMode === 'real',
+    output_directory: outputDirectory,
+  }
+  console.log(`BUILD_MODE=${apiMode} OUTPUT_DIR=${outputDirectory}`)
   const runtimeAdapter = path.resolve(
     import.meta.dirname,
     apiMode === 'mock'
@@ -21,10 +30,23 @@ export default defineConfig(({ mode }) => {
     apiMode === 'mock' ? './src/api/loginModeMock.ts' : './src/api/loginModeReal.ts',
   )
   return {
-    plugins: [vue(), tailwindcss()],
+    plugins: [
+      vue(),
+      tailwindcss(),
+      {
+        name: 'nexus-build-mode-metadata',
+        generateBundle() {
+          this.emitFile({
+            type: 'asset',
+            fileName: 'build-meta.json',
+            source: `${JSON.stringify(buildMetadata, null, 2)}\n`,
+          })
+        },
+      },
+    ],
     build: {
-      outDir: apiMode === 'mock' ? 'dist-mock' : 'dist-real',
-      emptyOutDir: false,
+      outDir: outputDirectory,
+      emptyOutDir: true,
       manifest: true,
     },
     resolve: {

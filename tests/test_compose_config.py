@@ -120,7 +120,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     assert "FROM node:24-alpine AS build" in dockerfile
     assert "RUN npm ci" in dockerfile
     assert "COPY . ." not in dockerfile
-    assert "npm run build:real" in dockerfile
+    assert "npm run build" in dockerfile
     assert "npm run audit:real" in dockerfile
     assert "nginxinc/nginx-unprivileged" in dockerfile
     assert "COPY --from=build /app/dist-real/" in dockerfile
@@ -133,6 +133,88 @@ def test_frontend_image_and_nginx_contract() -> None:
     assert "try_files $uri $uri/ /index.html" in nginx
     assert "immutable" in nginx
     assert "X-Content-Type-Options \"nosniff\"" in nginx
+
+
+def test_frontend_build_defaults_to_real_and_mock_is_explicit() -> None:
+    package = json.loads(
+        (PROJECT_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
+    )
+    scripts = package["scripts"]
+    vite_config = (PROJECT_ROOT / "frontend" / "vite.config.ts").read_text(
+        encoding="utf-8"
+    )
+    audit = (
+        PROJECT_ROOT / "frontend" / "scripts" / "audit-real-build.mjs"
+    ).read_text(encoding="utf-8")
+    root_readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    frontend_readme = (PROJECT_ROOT / "frontend" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    github_workflow = (
+        PROJECT_ROOT / ".github" / "workflows" / "frontend-build.yml"
+    ).read_text(encoding="utf-8")
+
+    assert scripts["build"] == "npm run build:real"
+    assert scripts["build:mock"] == "vite build --mode mock"
+    assert scripts["build:real"] == "node scripts/build-real.mjs"
+    assert scripts["ci:build"] == (
+        "npm run build && npm run audit:real && npm run build:mock"
+    )
+    assert "VITE_API_MODE must be explicitly set to mock or real" in vite_config
+    assert "BUILD_MODE=${apiMode}" in vite_config
+    assert "build-meta.json" in vite_config
+    assert "production_deployable: apiMode === 'real'" in vite_config
+    assert "metadata.build_mode !== 'real'" in audit
+    assert "mockRuntimeAdapter" in audit
+    assert "src/mocks/" in audit
+    assert "permissions:\n  contents: read" in github_workflow
+    assert "node-version: 24" in github_workflow
+    assert "run: npm ci" in github_workflow
+    assert "run: npm run test:unit" in github_workflow
+    assert "run: npm run ci:build" in github_workflow
+    for documentation in (root_readme, frontend_readme):
+        assert "npm run build" in documentation
+        assert "npm run audit:real" in documentation
+        assert "npm run build:mock" in documentation
+        assert "build-meta.json" in documentation
+
+
+def test_frontend_build_rejects_missing_and_unknown_modes() -> None:
+    node = shutil.which("node")
+    vite = PROJECT_ROOT / "frontend" / "node_modules" / "vite" / "bin" / "vite.js"
+    if node is None or not vite.is_file():
+        pytest.skip("frontend npm dependencies are not installed")
+
+    environment = os.environ.copy()
+    environment.pop("VITE_API_MODE", None)
+    missing = subprocess.run(
+        [node, str(vite), "build", "--mode", "production"],
+        cwd=PROJECT_ROOT / "frontend",
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    environment["VITE_API_MODE"] = "unexpected"
+    unknown = subprocess.run(
+        [node, str(vite), "build", "--mode", "unexpected"],
+        cwd=PROJECT_ROOT / "frontend",
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert missing.returncode != 0
+    assert unknown.returncode != 0
+    for result in (missing, unknown):
+        assert "VITE_API_MODE must be explicitly set to mock or real" in (
+            result.stdout + result.stderr
+        )
 
 
 def test_compose_rejects_a_missing_production_secret(tmp_path: Path) -> None:
