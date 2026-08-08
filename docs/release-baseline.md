@@ -42,6 +42,8 @@ D-005 建立时的实际验证工具为 Python 3.13.13、pip 26.1.1、Node 24.14
 
 ```powershell
 python scripts/verify_release_baseline.py
+python scripts/verify_security_policy.py
+python scripts/verify_ci_contract.py
 python -m compileall app scripts ui tests
 pytest -q
 docker compose config -q

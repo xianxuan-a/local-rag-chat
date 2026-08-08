@@ -24,6 +24,10 @@ RUN test "${VITE_API_MODE}" = "real" \
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/xianxuan-a/local-rag-chat" \
+      org.opencontainers.image.revision="${VCS_REF}"
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist-real/ /usr/share/nginx/html/
 

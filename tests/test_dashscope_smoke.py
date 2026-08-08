@@ -10,6 +10,10 @@ from app.services.embedding_service import (
     DashScopeEmbeddingAdapter,
     EmbeddingConfig,
 )
+from app.services.chat_model_service import (
+    ChatRuntimeConfig,
+    DashScopeChatClient,
+)
 from tests.conftest import make_test_settings
 
 
@@ -32,3 +36,45 @@ def test_real_dashscope_embedding_smoke(tmp_path) -> None:
     vector = adapter.embed_query("RAG smoke test")
 
     assert len(vector) == 1024
+
+
+@pytest.mark.skipif(
+    os.getenv("RUN_DASHSCOPE_SMOKE") != "1"
+    or not os.getenv("DASHSCOPE_API_KEY"),
+    reason="requires RUN_DASHSCOPE_SMOKE=1 and DASHSCOPE_API_KEY",
+)
+def test_real_dashscope_chat_non_stream_and_stream_smoke() -> None:
+    client = DashScopeChatClient(
+        ChatRuntimeConfig(
+            model=os.getenv("DASHSCOPE_STAGING_CHAT_MODEL", "qwen-turbo"),
+            api_key=os.environ["DASHSCOPE_API_KEY"],
+            base_url=os.getenv("DASHSCOPE_BASE_URL") or None,
+            temperature=0.0,
+            max_tokens=16,
+            timeout_seconds=20,
+        )
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "This is an automated service health check.",
+        },
+        {
+            "role": "user",
+            "content": "Reply with one short English word meaning healthy.",
+        }
+    ]
+    calls = 0
+
+    def record_call() -> None:
+        nonlocal calls
+        calls += 1
+
+    answer = client.generate(messages, before_generation_call=record_call)
+    streamed = "".join(
+        client.stream_generate(messages, before_generation_call=record_call)
+    )
+
+    assert answer.strip()
+    assert streamed.strip()
+    assert calls == 2

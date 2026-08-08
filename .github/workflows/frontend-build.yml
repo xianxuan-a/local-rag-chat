@@ -1,4 +1,4 @@
-name: Frontend build
+name: CI
 
 on:
   push:
@@ -11,43 +11,299 @@ permissions:
   contents: read
 
 concurrency:
-  group: frontend-build-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: "3.11.15"
+  NODE_VERSION: "24.14.0"
+
 jobs:
-  build:
-    name: Vue Real and Mock contract
+  backend:
+    name: Backend locked tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --requirement requirements.lock
+      - name: Validate installed dependencies
+        run: python -m pip check
+      - name: Compile Python sources
+        run: python -m compileall -q app scripts ui tests
+      - name: Run backend tests
+        run: python -m pytest -q --junitxml=artifacts/ci/backend-tests.xml
+      - name: Record dependency inventory
+        if: always()
+        run: python -m pip freeze > artifacts/ci/python-dependencies.txt
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-evidence-${{ github.sha }}
+          path: |
+            artifacts/ci/backend-tests.xml
+            artifacts/ci/python-dependencies.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  migrations:
+    name: Alembic fresh and round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --requirement requirements.lock
+      - name: Run migration and cutover contracts
+        run: >-
+          python -m pytest -q
+          tests/test_migration_contract.py
+          tests/test_startup_migrations.py
+          tests/test_prepare_local_database.py
+          --junitxml=artifacts/ci/migration-tests.xml
+      - name: Upload migration evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: migration-evidence-${{ github.sha }}
+          path: artifacts/ci/migration-tests.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend:
+    name: Frontend static and unit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: 24
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-
-      - name: Install locked dependencies
-        run: npm ci
-
-      - name: Type-check
-        run: npm run type-check
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Audit colors
-        run: npm run lint:colors
-
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm run lint
+      - run: npm run lint:colors
+      - run: npm run format:check
       - name: Run unit tests
-        run: npm run test:unit
+        run: >-
+          npm run test:unit --
+          --reporter=default
+          --reporter=junit
+          --outputFile=artifacts/ci/frontend-unit.xml
+      - name: Upload frontend unit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-unit-evidence-${{ github.sha }}
+          path: frontend/artifacts/ci/frontend-unit.xml
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Build and audit Real, then build explicit Mock
-        run: npm run ci:build
+  builds:
+    name: Vue Real and explicit Mock builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run ci:build
+
+  compose:
+    name: Production Compose contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generate isolated non-production Compose inputs
+        shell: python
+        run: |
+          import os
+          import secrets
+
+          names = (
+              "JWT" + "_SECRET",
+              "METRICS" + "_SCRAPE_TOKEN",
+              "BACKUP" + "_SIGNING_KEY",
+              "BOOTSTRAP" + "_SECRET",
+          )
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              for index, name in enumerate(names):
+                  output.write(f"{name}=ci-{index}-{secrets.token_urlsafe(32)}!\n")
+      - run: docker compose config -q
+
+  docker-smoke:
+    name: Production Docker health and restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --requirement requirements.lock
+      - name: Run isolated fresh-volume smoke
+        env:
+          RUN_DOCKER_COMPOSE_SMOKE: "1"
+        run: python -m pytest -q tests/test_compose_smoke.py --junitxml=artifacts/ci/docker-smoke.xml
+      - name: Upload Docker smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-smoke-evidence-${{ github.sha }}
+          path: artifacts/ci/docker-smoke.xml
+          if-no-files-found: error
+          retention-days: 14
+
+  mock-e2e:
+    name: Mock browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chrome
+      - run: npm run build:mock
+      - name: Run Mock browser suite
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: artifacts/ci/mock-e2e.xml
+        run: npm run test:e2e -- --reporter=list,junit
+      - name: Upload Mock browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mock-e2e-evidence-${{ github.sha }}
+          path: |
+            frontend/artifacts/ci/mock-e2e.xml
+            frontend/artifacts/playwright-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  real-e2e:
+    name: Deterministic Vue Real Docker E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --requirement requirements.lock
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chrome
+        working-directory: frontend
+      - name: Run isolated Real API and backend-down browser chain
+        env:
+          RUN_DOCKER_FRONTEND_E2E: "1"
+        run: python -m pytest -q tests/test_frontend_compose_e2e.py --junitxml=artifacts/ci/real-e2e.xml
+      - name: Upload Real browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-e2e-evidence-${{ github.sha }}
+          path: |
+            artifacts/ci/real-e2e.xml
+            frontend/artifacts/playwright-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  security:
+    name: Dependency and secret security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify time-limited security exceptions
+        run: python scripts/verify_security_policy.py
+      - name: Audit Python lock
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.lock
+          no-deps: true
+          disable-pip: true
+          ignore-vulns: PYSEC-2026-311
+      - name: Audit npm lock at high severity
+        run: npm audit --audit-level=high
+        working-directory: frontend
+      - name: Scan release tree for secrets and untracked inputs
+        run: python scripts/verify_release_baseline.py
+      - name: Verify CI workflow security contract
+        run: python scripts/verify_ci_contract.py
+
+  required-checks:
+    name: Required checks
+    if: always()
+    needs:
+      - backend
+      - migrations
+      - frontend
+      - builds
+      - compose
+      - docker-smoke
+      - mock-e2e
+      - real-e2e
+      - security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject any failed or skipped gate
+        env:
+          BACKEND: ${{ needs.backend.result }}
+          MIGRATIONS: ${{ needs.migrations.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          BUILDS: ${{ needs.builds.result }}
+          COMPOSE: ${{ needs.compose.result }}
+          DOCKER_SMOKE: ${{ needs['docker-smoke'].result }}
+          MOCK_E2E: ${{ needs['mock-e2e'].result }}
+          REAL_E2E: ${{ needs['real-e2e'].result }}
+          SECURITY: ${{ needs.security.result }}
+        run: |
+          for result in "$BACKEND" "$MIGRATIONS" "$FRONTEND" "$BUILDS" "$COMPOSE" "$DOCKER_SMOKE" "$MOCK_E2E" "$REAL_E2E" "$SECURITY"; do
+            test "$result" = "success"
+          done
+          echo "required_checks=PASS commit_sha=${GITHUB_SHA}"

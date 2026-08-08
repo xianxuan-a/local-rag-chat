@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "exceptions": [
+    {
+      "id": "PYSEC-2026-311",
+      "package": "chromadb",
+      "version": "1.5.9",
+      "approved_on": "2026-08-08",
+      "expires_on": "2026-09-01",
+      "severity": "critical",
+      "reason": "No fixed stable ChromaDB release exists. The application uses a local PersistentClient with application-owned collection configuration and an explicit embedding function; it never starts the vulnerable Chroma Python HTTP server or connects an HttpClient to an untrusted server.",
+      "tracking": "https://github.com/chroma-core/chroma/issues/6717"
+    }
+  ]
+}

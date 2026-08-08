@@ -1,0 +1,188 @@
+name: Production release gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_gate:
+        description: Run paid staging and build SHA-bound production candidates
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-gate
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11.15"
+  NODE_VERSION: "24.14.0"
+
+jobs:
+  source-commit:
+    name: Protected source commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require main and explicit manual confirmation
+        env:
+          CONFIRMED: ${{ inputs.confirm_production_gate }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            test "$CONFIRMED" = "true"
+          fi
+          echo "release_commit=${GITHUB_SHA}"
+
+  dashscope-staging:
+    name: Protected DashScope staging
+    needs: source-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --requirement requirements.lock
+      - name: Check protected credential without printing it
+        id: credential
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: |
+          if [ -n "$DASHSCOPE_API_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "DASHSCOPE_STAGING=READY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "DASHSCOPE_STAGING=BLOCKED_MISSING_SECRET" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Verify provider error handling without network
+        run: python -m pytest -q tests/test_embedding_service.py tests/test_chat_model_service.py
+      - name: Run minimum-cost real embedding, chat and stream checks
+        if: steps.credential.outputs.available == 'true'
+        env:
+          RUN_DASHSCOPE_SMOKE: "1"
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DASHSCOPE_BASE_URL: ${{ secrets.DASHSCOPE_BASE_URL }}
+          DASHSCOPE_STAGING_CHAT_MODEL: qwen-turbo
+        run: python -m pytest -q tests/test_dashscope_smoke.py
+      - name: Block production evidence when credential is unavailable
+        if: steps.credential.outputs.available != 'true'
+        run: |
+          echo "::error::Protected staging secret DASHSCOPE_API_KEY is unavailable."
+          exit 1
+
+  deterministic-real-e2e:
+    name: Release Vue Real chain
+    needs: source-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: python -m pip install --requirement requirements.lock
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chrome
+        working-directory: frontend
+      - name: Run Real Docker browser chain
+        env:
+          RUN_DOCKER_FRONTEND_E2E: "1"
+          IMAGE_TAG: ${{ github.sha }}
+        run: python -m pytest -q tests/test_frontend_compose_e2e.py
+
+  recovery-drill:
+    name: Restart and disaster recovery drill
+    needs: source-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install --requirement requirements.lock
+      - name: Verify leases, online backup, offline restore and negative archives
+        run: >-
+          python -m pytest -q
+          tests/test_engineering_foundation.py
+          tests/test_job_business_recovery.py
+          tests/test_backup_restore_security.py
+          tests/test_migration_contract.py
+      - name: Verify isolated volume migration, restart and production rejection
+        env:
+          RUN_DOCKER_COMPOSE_SMOKE: "1"
+          IMAGE_TAG: ${{ github.sha }}
+        run: python -m pytest -q tests/test_compose_smoke.py
+
+  production-images:
+    name: SHA-bound production images and evidence
+    needs:
+      - dashscope-staging
+      - deterministic-real-e2e
+      - recovery-drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build backend image from the gated commit
+        run: >-
+          docker build --pull
+          --build-arg VCS_REF=${GITHUB_SHA}
+          --tag local-rag-chat:${GITHUB_SHA} .
+      - name: Build frontend Real image from the gated commit
+        run: >-
+          docker build --pull
+          --build-arg VCS_REF=${GITHUB_SHA}
+          --build-arg VITE_API_MODE=real
+          --build-arg VITE_API_BASE_URL=/
+          --tag local-rag-chat-frontend:${GITHUB_SHA} frontend
+      - name: Verify immutable revision labels
+        run: |
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' local-rag-chat:${GITHUB_SHA})" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' local-rag-chat-frontend:${GITHUB_SHA})" = "$GITHUB_SHA"
+      - run: npm ci
+        working-directory: frontend
+      - name: Generate allowlisted release evidence
+        run: |
+          mkdir -p .release-evidence
+          docker run --rm --entrypoint python local-rag-chat:${GITHUB_SHA} -m pip freeze > .release-evidence/python-dependencies.txt
+          npm ls --all --json --prefix frontend > .release-evidence/node-dependencies.json
+          python scripts/create_release_evidence.py --output .release-evidence/release-manifest.json --dashscope-staging passed --deterministic-real-e2e passed --recovery-drill passed --production-images passed
+      - name: Upload production candidate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-evidence-${{ github.sha }}
+          path: |
+            .release-evidence/release-manifest.json
+            .release-evidence/python-dependencies.txt
+            .release-evidence/node-dependencies.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30

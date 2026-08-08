@@ -17,6 +17,10 @@ RUN python -m pip install \
 
 FROM python:3.11.15-slim-bookworm AS runtime
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/xianxuan-a/local-rag-chat" \
+      org.opencontainers.image.revision="${VCS_REF}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

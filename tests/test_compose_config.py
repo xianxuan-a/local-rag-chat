@@ -168,9 +168,10 @@ def test_frontend_build_defaults_to_real_and_mock_is_explicit() -> None:
     assert "mockRuntimeAdapter" in audit
     assert "src/mocks/" in audit
     assert "permissions:\n  contents: read" in github_workflow
-    assert "node-version: 24" in github_workflow
+    assert 'NODE_VERSION: "24.14.0"' in github_workflow
+    assert "node-version: ${{ env.NODE_VERSION }}" in github_workflow
     assert "run: npm ci" in github_workflow
-    assert "run: npm run test:unit" in github_workflow
+    assert "npm run test:unit --" in github_workflow
     assert "run: npm run ci:build" in github_workflow
     for documentation in (root_readme, frontend_readme):
         assert "npm run build" in documentation

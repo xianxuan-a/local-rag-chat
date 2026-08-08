@@ -6,11 +6,12 @@ x-default-logging: &default-logging
 
 services:
   backend:
-    image: local-rag-chat:0.1.0
+    image: "local-rag-chat:${IMAGE_TAG:-0.1.0}"
     build:
       context: .
       args:
         PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        VCS_REF: "${IMAGE_TAG:-0.1.0}"
     command: ["python", "run.py"]
     environment:
       ENVIRONMENT: "production"
@@ -99,7 +100,7 @@ services:
     logging: *default-logging
 
   migrate:
-    image: local-rag-chat:0.1.0
+    image: "local-rag-chat:${IMAGE_TAG:-0.1.0}"
     command: ["python", "scripts/run_migrations.py"]
     environment:
       DATA_DIR: "/app/data"
@@ -110,13 +111,14 @@ services:
     logging: *default-logging
 
   frontend:
-    image: local-rag-chat-frontend:0.1.0
+    image: "local-rag-chat-frontend:${IMAGE_TAG:-0.1.0}"
     build:
       context: ./frontend
       args:
         VITE_API_MODE: "real"
         VITE_API_BASE_URL: "/"
         VITE_API_TIMEOUT_MS: "${VITE_API_TIMEOUT_MS:-15000}"
+        VCS_REF: "${IMAGE_TAG:-0.1.0}"
     ports:
       - "${FRONTEND_PORT:-8501}:8080"
     depends_on:
@@ -133,7 +135,7 @@ services:
 
   legacy-ui:
     profiles: ["legacy"]
-    image: local-rag-chat:0.1.0
+    image: "local-rag-chat:${IMAGE_TAG:-0.1.0}"
     command:
       - streamlit
       - run

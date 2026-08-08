@@ -396,6 +396,8 @@ python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --toke
 
 Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 通过 `python run.py` 统一读取监听配置，并固定 backend `HOST=0.0.0.0`、`workers=1`、`AUTH_REQUIRED=true`、认证限流开启以及可信代理主机 `frontend`。生产环境不能关闭认证或认证限流；Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失 Secret，应用配置模型再于监听端口前校验长度、明显弱值、符号多样性和用途隔离。
 
+Compose 镜像 tag 可通过 `IMAGE_TAG` 覆盖；发布门禁固定传入完整 commit SHA，并验证镜像 OCI revision label 与 SHA 一致。CI/CD jobs、DashScope staging、恢复演练、artifact allowlist 和 main 分支保护操作见 [CI/CD 与生产发布门禁](docs/ci-cd-release-gates.md)。仓库不会自动部署生产。
+
 后端镜像基于固定的 Python 3.11 runtime，并从 `requirements.lock` 安装完整传递依赖；更新 `requirements.txt` 后必须在干净环境重新解析锁文件、运行完整验证并与代码一起提交，不能只更新直接依赖清单。
 
 后端与前端 Docker context 均采用 deny-by-default allowlist：只向构建器发送锁文件、运行源码、迁移、必要脚本和静态构建配置。宿主机 `.env*`、`.git`、虚拟环境、`node_modules`、测试/Playwright 产物、数据库、Chroma、上传、日志和备份不会进入 context。两个 Dockerfile 也只执行显式 `COPY`；后端通过独立依赖阶段从 `requirements.lock` 安装并校验依赖，前端通过 Node builder 的 `npm ci` 生成 `dist-real`，两个运行镜像都不携带宿主依赖、测试文件或构建期源码。修改 Dockerfile 输入时必须同步更新对应 `.dockerignore` allowlist，并重新执行无缓存和缓存构建。

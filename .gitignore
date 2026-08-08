@@ -39,6 +39,7 @@ Thumbs.db
 # 日志和数据库
 logs/
 artifacts/
+.release-evidence/
 *.log
 *.db
 *.db-shm
