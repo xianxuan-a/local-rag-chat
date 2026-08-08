@@ -105,11 +105,15 @@ def test_frontend_image_and_nginx_contract() -> None:
     )
 
     assert 'CMD ["python", "run.py"]' in backend_dockerfile
+    assert "AS dependencies" in backend_dockerfile
+    assert "AS runtime" in backend_dockerfile
     assert "COPY requirements.txt requirements.lock ./" in backend_dockerfile
     assert "-r requirements.lock" in backend_dockerfile
     assert "-r requirements.txt" not in backend_dockerfile
+    assert "COPY . ." not in backend_dockerfile
     assert "FROM node:24-alpine AS build" in dockerfile
     assert "RUN npm ci" in dockerfile
+    assert "COPY . ." not in dockerfile
     assert "npm run build:real" in dockerfile
     assert "npm run audit:real" in dockerfile
     assert "nginxinc/nginx-unprivileged" in dockerfile

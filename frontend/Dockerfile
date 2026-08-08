@@ -5,7 +5,10 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --fetch-retries=5 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=60000
 
-COPY . .
+COPY index.html tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts ./
+COPY public ./public
+COPY scripts/build-real.mjs scripts/audit-real-build.mjs ./scripts/
+COPY src ./src
 
 ARG VITE_API_MODE=real
 ARG VITE_API_BASE_URL=/

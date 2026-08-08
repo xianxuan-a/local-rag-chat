@@ -37,6 +37,8 @@ VITE_API_TIMEOUT_MS=15000
 
 `dev:real` 继续使用 `.env.real` 的 `http://127.0.0.1:8000`。`build:real` 则固定以同源 `/` 构建，适用于仓库中的 Nginx 代理；可通过 `npm run audit:real` 扫描 manifest 当前模块图，确认正式包不包含 Mock 标识、fixtures、Mock 上传路径或本地开发 API 地址。
 
+Docker build context 使用 deny-by-default allowlist，只包含 package lock、Vite/TypeScript 构建配置、`src`、`public`、Real 构建审计脚本和 Nginx 配置；宿主 `node_modules`、`.env*`、dist、测试、截图与 Playwright 报告不会发送给构建器。Dockerfile 使用显式 `COPY`，依赖只能由 Linux builder 内的 `npm ci` 安装，最终非 root Nginx 镜像只复制 `dist-real`。
+
 Mock 变更只存在于当前页面运行内存中。刷新页面后会恢复固定 ID、固定时间和固定排序的种子数据，不使用 `localStorage` 假装持久化，也不会发出真实业务网络请求。
 
 ## Real 模式认证边界

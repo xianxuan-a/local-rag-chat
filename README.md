@@ -373,6 +373,8 @@ Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Re
 
 后端镜像基于固定的 Python 3.11 runtime，并从 `requirements.lock` 安装完整传递依赖；更新 `requirements.txt` 后必须在干净环境重新解析锁文件、运行完整验证并与代码一起提交，不能只更新直接依赖清单。
 
+后端与前端 Docker context 均采用 deny-by-default allowlist：只向构建器发送锁文件、运行源码、迁移、必要脚本和静态构建配置。宿主机 `.env*`、`.git`、虚拟环境、`node_modules`、测试/Playwright 产物、数据库、Chroma、上传、日志和备份不会进入 context。两个 Dockerfile 也只执行显式 `COPY`；后端通过独立依赖阶段从 `requirements.lock` 安装并校验依赖，前端通过 Node builder 的 `npm ci` 生成 `dist-real`，两个运行镜像都不携带宿主依赖、测试文件或构建期源码。修改 Dockerfile 输入时必须同步更新对应 `.dockerignore` allowlist，并重新执行无缓存和缓存构建。
+
 首次部署先从示例生成本机 `.env`，不要把生成后的值提交到仓库：
 
 ```powershell
@@ -385,6 +387,7 @@ python scripts/init_secrets.py --env-file .env
 ```powershell
 docker compose config -q
 docker compose build --no-cache backend frontend
+docker compose build --progress=plain backend frontend
 docker compose up -d
 docker compose ps
 Invoke-WebRequest http://localhost:8501/healthz
@@ -393,6 +396,8 @@ Invoke-WebRequest http://localhost:8000/health/ready
 ```
 
 默认构建源为官方 PyPI。受限网络可在 `.env` 中设置 `PIP_INDEX_URL` 为组织批准的镜像；该值只影响镜像构建，不会写入应用运行配置。
+
+可用 `docker history local-rag-chat:0.1.0` 和 `docker history local-rag-chat-frontend:0.1.0` 检查层输入，再用临时容器检查 `/app` 与 `/usr/share/nginx/html`；运行镜像中不应出现 `.env`、`.git`、数据库、上传、测试产物或前端 `node_modules`。
 
 `/health/live` 只表示 FastAPI 进程存活；`/health/ready` 还会校验 SQLite、Alembic head、全部持久目录、Chroma 和 Job worker。前端 `/healthz` 只检查 Nginx/静态服务，启动顺序仍要求 backend healthy。主机端口可用 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT` 调整，容器内端口保持 8000/8080。
 

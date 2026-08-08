@@ -1,16 +1,28 @@
-FROM python:3.11.15-slim-bookworm
+FROM python:3.11.15-slim-bookworm AS dependencies
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+WORKDIR /build
 
 COPY requirements.txt requirements.lock ./
 ARG PIP_INDEX_URL=https://pypi.org/simple
-RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements.lock
+RUN python -m pip install \
+        --no-cache-dir \
+        --index-url "$PIP_INDEX_URL" \
+        --prefix=/install \
+        -r requirements.lock \
+    && PYTHONPATH=/install/lib/python3.11/site-packages \
+        python -m pip check
 
-COPY . ./
+FROM python:3.11.15-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY --from=dependencies /install/ /usr/local/
 
 RUN mkdir -p \
         /app/data/logs \
@@ -24,6 +36,12 @@ RUN mkdir -p \
     && addgroup --system app \
     && adduser --system --ingroup app app \
     && chown -R app:app /app
+
+COPY --chown=app:app alembic.ini run.py ./
+COPY --chown=app:app alembic ./alembic
+COPY --chown=app:app app ./app
+COPY --chown=app:app scripts/*.py ./scripts/
+COPY --chown=app:app ui ./ui
 
 USER app
 
