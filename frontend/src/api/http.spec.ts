@@ -140,6 +140,26 @@ describe('HttpClient', () => {
     })
   })
 
+  it('preserves Retry-After seconds on HTTP 429 errors', async () => {
+    const client = new HttpClient(config, {
+      fetcher: vi.fn<typeof fetch>().mockResolvedValue(
+        response(
+          {
+            code: 429,
+            message: '尝试次数过多，请稍后再试',
+            data: { retry_after: 7 },
+          },
+          { status: 429, headers: { 'Retry-After': '7' } },
+        ),
+      ),
+    })
+
+    await expect(client.request('/api/auth/login')).rejects.toMatchObject({
+      status: 429,
+      retryAfterSeconds: 7,
+    })
+  })
+
   it('distinguishes network errors, timeout and caller cancellation', async () => {
     const network = new HttpClient(config, {
       fetcher: vi

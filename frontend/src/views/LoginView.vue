@@ -36,14 +36,41 @@ const identityError = ref('')
 const passwordError = ref('')
 const formMessage = ref('')
 const formMessageKind = ref<'error' | 'info'>('error')
+const retryAfterSeconds = ref(0)
 
 const isSubmitting = computed(() => authStore.status === 'submitting')
+const isSubmitDisabled = computed(
+  () => isSubmitting.value || retryAfterSeconds.value > 0,
+)
 const passwordType = computed(() => (showPassword.value ? 'text' : 'password'))
 const passwordToggleLabel = computed(() =>
   showPassword.value ? '隐藏密码' : '显示密码',
 )
 
 let introMedia: ReturnType<typeof gsap.matchMedia> | null = null
+let retryInterval = 0
+
+function updateRetryMessage(): void {
+  if (retryAfterSeconds.value > 0) {
+    formMessageKind.value = 'error'
+    formMessage.value = `尝试次数过多，请在 ${retryAfterSeconds.value} 秒后重试。`
+    return
+  }
+  window.clearInterval(retryInterval)
+  retryInterval = 0
+  formMessageKind.value = 'info'
+  formMessage.value = '现在可以重新尝试登录。'
+}
+
+function startRetryCountdown(seconds: number | null | undefined): void {
+  window.clearInterval(retryInterval)
+  retryAfterSeconds.value = Math.max(1, Math.ceil(seconds ?? 1))
+  updateRetryMessage()
+  retryInterval = window.setInterval(() => {
+    retryAfterSeconds.value = Math.max(0, retryAfterSeconds.value - 1)
+    updateRetryMessage()
+  }, 1000)
+}
 
 function passwordByteLength(value: string): number {
   return new TextEncoder().encode(value).length
@@ -74,12 +101,16 @@ function validateForm(): boolean {
 
 function clearIdentityError(): void {
   identityError.value = ''
-  if (formMessageKind.value === 'error') formMessage.value = ''
+  if (formMessageKind.value === 'error' && retryAfterSeconds.value === 0) {
+    formMessage.value = ''
+  }
 }
 
 function clearPasswordError(): void {
   passwordError.value = ''
-  if (formMessageKind.value === 'error') formMessage.value = ''
+  if (formMessageKind.value === 'error' && retryAfterSeconds.value === 0) {
+    formMessage.value = ''
+  }
 }
 
 function setKnowledgeFocus(group: KnowledgeGroup, active: boolean): void {
@@ -96,7 +127,9 @@ function loginErrorMessage(error: unknown): string {
     if (error.status === 401) return '用户名、邮箱或密码不正确。'
     if (error.status === 403) return '当前账户无法登录，请联系系统管理员。'
     if (error.status === 422) return '账号或密码格式不符合认证服务要求。'
-    if (error.status === 429) return '尝试次数过多，请稍后再试。'
+    if (error.status === 429) {
+      return `尝试次数过多，请在 ${Math.max(1, error.retryAfterSeconds ?? 1)} 秒后重试。`
+    }
     if (error.status !== null && error.status >= 500) {
       return '认证服务暂时不可用，请稍后再试。'
     }
@@ -120,7 +153,7 @@ async function animateMessage(): Promise<void> {
 }
 
 async function handleSubmit(): Promise<void> {
-  if (isSubmitting.value) return
+  if (isSubmitDisabled.value) return
   formMessage.value = ''
   if (!validateForm()) return
 
@@ -147,7 +180,11 @@ async function handleSubmit(): Promise<void> {
     await router.replace(destination)
   } catch (error) {
     formMessageKind.value = 'error'
-    formMessage.value = loginErrorMessage(error)
+    if (error instanceof AppError && error.status === 429) {
+      startRetryCountdown(error.retryAfterSeconds)
+    } else {
+      formMessage.value = loginErrorMessage(error)
+    }
     starMapRef.value?.restore()
     if (cardRef.value) {
       gsap.to(cardRef.value, {
@@ -189,6 +226,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.clearInterval(retryInterval)
   introMedia?.revert()
   introMedia = null
   if (cardRef.value) gsap.killTweensOf(cardRef.value)
@@ -304,11 +342,19 @@ onBeforeUnmount(() => {
               class="login-submit-button"
               :class="{ 'is-submitting': isSubmitting }"
               type="submit"
-              :disabled="isSubmitting"
+              :disabled="isSubmitDisabled"
               :aria-busy="isSubmitting"
               data-login-intro
             >
-              <span>{{ isSubmitting ? '验证中…' : '登录' }}</span>
+              <span>
+                {{
+                  isSubmitting
+                    ? '验证中…'
+                    : retryAfterSeconds > 0
+                      ? `${retryAfterSeconds} 秒后重试`
+                      : '登录'
+                }}
+              </span>
               <span class="login-submit-arrow" aria-hidden="true">↗</span>
             </button>
 

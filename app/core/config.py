@@ -7,8 +7,12 @@ the application never mutates the filesystem.
 
 from __future__ import annotations
 
+import secrets
+from collections import Counter
 from functools import lru_cache
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
+from itertools import combinations
+from math import log2
 from pathlib import Path
 from typing import ClassVar
 
@@ -20,6 +24,83 @@ from app.core.retrieval_modes import DEFAULT_FRESHNESS_TERMS, RetrievalMode
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = _PROJECT_ROOT
+
+PRODUCTION_SECRET_POLICIES: dict[str, tuple[int, float]] = {
+    "JWT_SECRET": (32, 128.0),
+    "METRICS_SCRAPE_TOKEN": (32, 128.0),
+    "BACKUP_SIGNING_KEY": (32, 128.0),
+    "BOOTSTRAP_SECRET": (32, 128.0),
+}
+_OBVIOUS_WEAK_SECRET_MARKERS = (
+    "0123456789",
+    "1234567890",
+    "abcdefghijklmnopqrstuvwxyz",
+    "browsertests",
+    "changeme",
+    "defaultsecret",
+    "defaulttoken",
+    "dummysecret",
+    "dummytoken",
+    "example",
+    "insecure",
+    "notconfigured",
+    "password",
+    "placeholder",
+    "replaceme",
+    "testkey",
+    "testsecret",
+    "testtoken",
+    "yoursecret",
+    "yourtoken",
+)
+
+
+def _estimated_symbol_diversity_bits(value: str) -> float:
+    """Estimate observed byte diversity; this is not a claim of true entropy."""
+
+    encoded = value.encode("utf-8")
+    if not encoded:
+        return 0.0
+    counts = Counter(encoded)
+    length = len(encoded)
+    bits_per_symbol = -sum(
+        (count / length) * log2(count / length)
+        for count in counts.values()
+    )
+    return bits_per_symbol * length
+
+
+def _is_repeated_pattern(value: str) -> bool:
+    """Detect a whole value made from a short repeated unit."""
+
+    maximum_unit_length = min(16, len(value) // 2)
+    return any(
+        len(value) % unit_length == 0
+        and value == value[:unit_length] * (len(value) // unit_length)
+        for unit_length in range(1, maximum_unit_length + 1)
+    )
+
+
+def production_secret_problem(name: str, value: str) -> str | None:
+    """Return a safe policy failure without including the Secret value."""
+
+    minimum_bytes, minimum_diversity_bits = PRODUCTION_SECRET_POLICIES[name]
+    if not value or not value.strip():
+        return "缺失或仅包含空白"
+    if value != value.strip():
+        return "首尾包含空白"
+    if len(value.encode("utf-8")) < minimum_bytes:
+        return f"少于 {minimum_bytes} UTF-8 bytes"
+    normalized = "".join(
+        character for character in value.casefold() if character.isalnum()
+    )
+    if any(marker in normalized for marker in _OBVIOUS_WEAK_SECRET_MARKERS):
+        return "包含明显默认值或占位符"
+    if _is_repeated_pattern(value):
+        return "包含明显重复模式"
+    if _estimated_symbol_diversity_bits(value) < minimum_diversity_bits:
+        return "符号多样性不足；长度不代表随机强度"
+    return None
 
 
 def normalize_listen_host(value: object) -> str:
@@ -166,6 +247,33 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1, le=1440)
     AUTH_REQUIRED: bool = False
     ALLOW_REGISTRATION: bool = True
+    AUTH_RATE_LIMIT_ENABLED: bool = True
+    AUTH_RATE_LIMIT_MAX_KEYS: int = Field(default=10000, ge=100, le=1_000_000)
+    AUTH_RATE_LIMIT_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(default=300, ge=10, le=86400)
+    LOGIN_RATE_LIMIT_IP_ATTEMPTS: int = Field(default=50, ge=1, le=10000)
+    LOGIN_RATE_LIMIT_ACCOUNT_ATTEMPTS: int = Field(default=10, ge=1, le=10000)
+    LOGIN_RATE_LIMIT_COMBINATION_ATTEMPTS: int = Field(default=5, ge=1, le=10000)
+    LOGIN_RATE_LIMIT_BACKOFF_BASE_SECONDS: int = Field(
+        default=2, ge=1, le=3600
+    )
+    LOGIN_RATE_LIMIT_BACKOFF_MAX_SECONDS: int = Field(
+        default=300, ge=1, le=86400
+    )
+    REGISTER_RATE_LIMIT_WINDOW_SECONDS: int = Field(
+        default=3600, ge=10, le=86400
+    )
+    REGISTER_RATE_LIMIT_IP_ATTEMPTS: int = Field(default=20, ge=1, le=10000)
+    REGISTER_RATE_LIMIT_TARGET_ATTEMPTS: int = Field(default=5, ge=1, le=10000)
+    BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS: int = Field(
+        default=3600, ge=10, le=86400
+    )
+    BOOTSTRAP_RATE_LIMIT_IP_ATTEMPTS: int = Field(default=5, ge=1, le=10000)
+    BOOTSTRAP_RATE_LIMIT_GLOBAL_ATTEMPTS: int = Field(
+        default=10, ge=1, le=10000
+    )
+    TRUSTED_PROXY_CIDRS: list[str] = Field(default_factory=list)
+    TRUSTED_PROXY_HOSTS: list[str] = Field(default_factory=list)
     METRICS_SCRAPE_TOKEN: SecretStr = SecretStr("")
     BACKUP_SIGNING_KEY: SecretStr = SecretStr("")
     BOOTSTRAP_SECRET: SecretStr = SecretStr("")
@@ -191,6 +299,42 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_host(cls, value: object) -> str:
         return normalize_listen_host(value)
+
+    @field_validator("TRUSTED_PROXY_CIDRS")
+    @classmethod
+    def normalize_trusted_proxy_cidrs(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip()
+            if not value:
+                raise ValueError("TRUSTED_PROXY_CIDRS 不允许空值")
+            try:
+                network = str(ip_network(value, strict=False))
+            except ValueError as exc:
+                raise ValueError(
+                    f"TRUSTED_PROXY_CIDRS 包含无效网络：{value}"
+                ) from exc
+            if network not in normalized:
+                normalized.append(network)
+        return normalized
+
+    @field_validator("TRUSTED_PROXY_HOSTS")
+    @classmethod
+    def normalize_trusted_proxy_hosts(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_value in values:
+            value = raw_value.strip().casefold()
+            if (
+                not value
+                or any(character.isspace() for character in value)
+                or any(character in value for character in "/:@[]")
+            ):
+                raise ValueError(
+                    "TRUSTED_PROXY_HOSTS 只接受不含端口的 DNS 主机名"
+                )
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
 
     @field_validator(
         "LOG_DIR",
@@ -427,41 +571,66 @@ class Settings(BaseSettings):
             raise ValueError(
                 "本版本不持久化网页正文，WEB_CONTENT_CACHE_ENABLED 必须为 false"
             )
+        longest_rate_limit_window = max(
+            self.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+            self.REGISTER_RATE_LIMIT_WINDOW_SECONDS,
+            self.BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if self.AUTH_RATE_LIMIT_TTL_SECONDS < longest_rate_limit_window:
+            raise ValueError(
+                "AUTH_RATE_LIMIT_TTL_SECONDS 不能小于认证限流窗口"
+            )
+        if (
+            self.LOGIN_RATE_LIMIT_BACKOFF_MAX_SECONDS
+            < self.LOGIN_RATE_LIMIT_BACKOFF_BASE_SECONDS
+        ):
+            raise ValueError(
+                "LOGIN_RATE_LIMIT_BACKOFF_MAX_SECONDS 不能小于基础退避"
+            )
         environment = self.ENVIRONMENT.strip().casefold()
         if environment == "production" and not self.AUTH_REQUIRED:
             raise ValueError("生产环境必须启用 AUTH_REQUIRED")
+        if environment == "production" and not self.AUTH_RATE_LIMIT_ENABLED:
+            raise ValueError("生产环境必须启用 AUTH_RATE_LIMIT_ENABLED")
         if not self.AUTH_REQUIRED and not is_explicit_loopback_host(self.HOST):
             raise ValueError(
                 "AUTH_REQUIRED=false 仅允许明确的 loopback HOST；"
                 f"当前 HOST={self.HOST!r}。局域网、容器或反向代理监听必须启用认证"
             )
         if environment == "production":
-            secret_names = (
-                "JWT_SECRET",
-                "METRICS_SCRAPE_TOKEN",
-                "BACKUP_SIGNING_KEY",
-                "BOOTSTRAP_SECRET",
-            )
             secret_values = {
                 name: getattr(self, name).get_secret_value()
-                for name in secret_names
+                for name in PRODUCTION_SECRET_POLICIES
             }
-            missing = [
-                name for name, value in secret_values.items() if not value
-            ]
-            if missing:
-                raise ValueError(
-                    "生产环境缺少显式 Secret：" + ", ".join(missing)
-                )
-            weak = [
-                name
+            invalid = {
+                name: problem
                 for name, value in secret_values.items()
-                if len(value.encode("utf-8")) < 32
-            ]
-            if weak:
+                if (problem := production_secret_problem(name, value))
+                is not None
+            }
+            if invalid:
                 raise ValueError(
-                    "生产环境 Secret 强度不足（至少 32 UTF-8 bytes）："
-                    + ", ".join(weak)
+                    "生产环境 Secret 不符合强度策略："
+                    + ", ".join(
+                        f"{name}（{problem}）"
+                        for name, problem in invalid.items()
+                    )
+                )
+            reused = [
+                (left_name, right_name)
+                for left_name, right_name in combinations(secret_values, 2)
+                if secrets.compare_digest(
+                    secret_values[left_name].encode("utf-8"),
+                    secret_values[right_name].encode("utf-8"),
+                )
+            ]
+            if reused:
+                raise ValueError(
+                    "生产环境 Secret 用途隔离失败，不得跨用途复用："
+                    + ", ".join(
+                        f"{left_name} / {right_name}"
+                        for left_name, right_name in reused
+                    )
                 )
         return self
 

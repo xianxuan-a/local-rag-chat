@@ -206,6 +206,12 @@ downgrade。应用不会迁移真实数据库；升级仍需用户在停机窗�
 - `/health`、`/health/live` 和 `/health/ready` 保持匿名，便于本机和容器健康检查；它们不提供管理员业务操作。`/metrics` 仍要求独立 scrape token。
 - `/metrics` 不接受管理员 JWT 代替鉴权，必须提供独立长期请求头 `X-Metrics-Scrape-Token`。
 
+认证敏感入口使用与单 worker 架构一致的进程内限流。登录失败同时累计来源 IP、`NFKC + casefold` 账号以及 IP+账号组合；默认窗口 300 秒，阈值分别为 50/10/5，达到阈值后从 2 秒开始指数退避，最大 300 秒。正确密码在冷却期间仍返回 429；成功登录只清理该账号和当前组合，不清理来源 IP 对其他账号产生的失败状态。注册按 IP 和规范化目标限制（默认每小时 20/5 次）；Bootstrap 使用更严格的 IP/全局限制（默认每小时 5/10 次）。429 响应包含整数秒 `Retry-After` 和 JSON `data.retry_after`，Vue 登录页会禁用提交并显示倒计时。
+
+限流状态使用单调时钟、进程锁、有界 LRU key 集合和 TTL 清理；默认最多 10000 个匿名化 key，重启进程后状态会清空，因此当前保证仅对应仓库支持的单进程部署。安全日志只记录请求 ID、入口、限流维度、进程内匿名摘要和等待秒数；Prometheus 指标 `local_rag_auth_rate_limit_events_total` 只使用入口和有限维度标签，不包含账号、邮箱或 IP。`run.py` 关闭会输出完整对端 IP 的 Uvicorn access log，由不记录客户端地址的 `app.http` 请求日志统一替代。
+
+客户端地址默认只取直接 TCP 对端，客户端自行发送的 `Forwarded` 或 `X-Forwarded-For` 不受信任。只有直接对端匹配 `TRUSTED_PROXY_CIDRS`，或匹配 `TRUSTED_PROXY_HOSTS` 的短期 DNS 解析结果时，程序才从代理链右侧跳过可信节点并选择第一个非可信地址；无效 header 会保守回退到直接对端。官方 Compose 只将 Docker DNS 中的 `frontend` 服务设为可信代理，Nginx 会把实际连接地址追加到 `X-Forwarded-For`。外部反向代理应优先把准确 IP/CIDR 加入 `TRUSTED_PROXY_CIDRS`，不要填写开放网络（例如 `0.0.0.0/0`），也不要仅因为收到代理 header 就扩大信任范围。
+
 需要从局域网访问时，正确做法是生成 Secret、启用认证并显式设置非 loopback Host，而不是关闭校验：
 
 ```powershell
@@ -216,7 +222,22 @@ $env:AUTH_REQUIRED="true"
 python run.py
 ```
 
-生产 Secret 应来自 `.env` 或部署系统的 Secret 注入；不要把真实值写进脚本或提交到 Git。
+生产 Secret 应来自 `.env` 或部署系统的 Secret 注入；不要把真实值写进脚本、日志、构建参数或提交到 Git。`JWT_SECRET`、`METRICS_SCRAPE_TOKEN`、`BACKUP_SIGNING_KEY`、`BOOTSTRAP_SECRET` 必须至少 32 UTF-8 bytes、具备不低于 128 bits 的观测符号多样性，且四者不能使用相同值。`changeme`、`default`、`placeholder`、重复字符等明显弱值即使长度足够也会在应用监听端口前被拒绝。该检查不适用于 DashScope 等第三方 API Key。
+
+推荐直接运行初始化器；它只补齐缺失或空值，每个用途都独立调用系统安全随机源，并且不会在终端打印 Secret：
+
+```powershell
+python scripts/init_secrets.py --env-file .env
+```
+
+如需人工注入部署系统，可分别运行下面任一命令四次，每次输出只分配给一个用途，切勿复制同一个值：
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
+```
+
+轮换时应先做可恢复备份并逐项更换：更换 `JWT_SECRET` 会立即使现有 JWT 失效，用户需要重新登录；更换 `METRICS_SCRAPE_TOKEN` 必须同步更新采集器；更换 `BACKUP_SIGNING_KEY` 后新 key 无法验证旧备份，因此应在安全位置保留旧 key，并在切换前实际测试恢复；更换 `BOOTSTRAP_SECRET` 只影响尚未完成的首次管理员初始化，初始化成功后 bootstrap 接口仍由数据库状态阻止再次使用。当前版本没有双 key 兼容或自动轮换，不能以旧值回退启动校验。
 
 主要认证接口：
 
@@ -369,7 +390,7 @@ python scripts/rebuild_kb.py --knowledge-base-id <uuid> --cleanup-retired --toke
 
 ## Docker
 
-Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 通过 `python run.py` 统一读取监听配置，并固定 backend `HOST=0.0.0.0`、`workers=1` 和 `AUTH_REQUIRED=true`。生产环境不能以免认证模式启动；四个生产 Secret 均为必填且至少 32 UTF-8 bytes，Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失值，应用配置模型继续负责 Host/Auth 边界、认证和 Secret 强度校验。
+Compose 的正式 `frontend` 是 Vue Real：Node 24 builder 执行 `npm ci`、Real 构建和 manifest 图审计，运行镜像只包含 `dist-real` 与非 root Nginx。Nginx 在容器内监听 8080，主机仍默认使用 `http://localhost:8501`；同源 `/api` 直接代理 `backend:8000`。Compose 通过 `python run.py` 统一读取监听配置，并固定 backend `HOST=0.0.0.0`、`workers=1`、`AUTH_REQUIRED=true`、认证限流开启以及可信代理主机 `frontend`。生产环境不能关闭认证或认证限流；Compose 使用 `${NAME:?required}` 在创建容器前拦截缺失 Secret，应用配置模型再于监听端口前校验长度、明显弱值、符号多样性和用途隔离。
 
 后端镜像基于固定的 Python 3.11 runtime，并从 `requirements.lock` 安装完整传递依赖；更新 `requirements.txt` 后必须在干净环境重新解析锁文件、运行完整验证并与代码一起提交，不能只更新直接依赖清单。
 
@@ -422,6 +443,7 @@ docker compose config --format json
 ```
 
 - `variable is required`：`.env` 缺少生产 Secret；重新运行 `init_secrets.py` 只会补齐空值，不会替换已有值。
+- `Secret 不符合强度策略` 或 `用途隔离失败`：已有值过短、明显可预测或被多个用途复用；初始化器不会擅自覆盖它，必须先备份并按上面的影响说明手动轮换对应项。
 - migrate 非零退出：backend 会保持未启动；先根据 migrate 日志修复数据库/卷权限或迁移问题，再重新 `docker compose up -d`。
 - backend 非零退出：检查生产认证、Secret 强度、数据库 revision 和实例锁日志，不要用 `AUTH_REQUIRED=false` 或 `ENVIRONMENT=development` 绕过。
 - backend 为 `unhealthy`：直接查看 `/health/ready` 返回的失败检查项和 backend 日志。

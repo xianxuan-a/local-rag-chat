@@ -55,6 +55,10 @@ def test_compose_expands_to_authenticated_migration_gated_backend() -> None:
 
     assert backend["environment"]["ENVIRONMENT"] == "production"
     assert backend["environment"]["AUTH_REQUIRED"] == "true"
+    assert backend["environment"]["AUTH_RATE_LIMIT_ENABLED"] == "true"
+    assert backend["environment"]["LOGIN_RATE_LIMIT_COMBINATION_ATTEMPTS"] == "5"
+    assert backend["environment"]["TRUSTED_PROXY_CIDRS"] == "[]"
+    assert backend["environment"]["TRUSTED_PROXY_HOSTS"] == '["frontend"]'
     assert backend["environment"]["HOST"] == "0.0.0.0"
     assert backend["command"] == ["python", "run.py"]
     assert backend["build"]["args"]["PIP_INDEX_URL"] == (
@@ -97,6 +101,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     backend_dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(
         encoding="utf-8"
     )
+    launcher = (PROJECT_ROOT / "run.py").read_text(encoding="utf-8")
     dockerfile = (PROJECT_ROOT / "frontend" / "Dockerfile").read_text(
         encoding="utf-8"
     )
@@ -105,6 +110,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     )
 
     assert 'CMD ["python", "run.py"]' in backend_dockerfile
+    assert "access_log=False" in launcher
     assert "AS dependencies" in backend_dockerfile
     assert "AS runtime" in backend_dockerfile
     assert "COPY requirements.txt requirements.lock ./" in backend_dockerfile
@@ -119,6 +125,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     assert "nginxinc/nginx-unprivileged" in dockerfile
     assert "COPY --from=build /app/dist-real/" in dockerfile
     assert "proxy_pass http://fastapi_backend" in nginx
+    assert 'proxy_set_header Forwarded ""' in nginx
     assert "location /api/" in nginx
     assert "proxy_buffering off" in nginx
     assert "proxy_request_buffering off" in nginx

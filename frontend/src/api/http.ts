@@ -74,6 +74,15 @@ function responseErrorMessage(status: number, backendMessage: string | null): st
   return `请求失败（HTTP ${status}）。`
 }
 
+function retryAfterSeconds(headers: Headers): number | null {
+  const rawValue = headers.get('Retry-After')?.trim()
+  if (!rawValue) return null
+  if (/^\d+$/.test(rawValue)) return Math.max(0, Number.parseInt(rawValue, 10))
+  const retryAt = Date.parse(rawValue)
+  if (!Number.isFinite(retryAt)) return null
+  return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))
+}
+
 export class HttpClient {
   private readonly baseUrl: string
   private readonly timeoutMs: number
@@ -225,6 +234,7 @@ export class HttpClient {
           kind: 'http',
           details: backendError.details ?? text,
           requestId,
+          retryAfterSeconds: retryAfterSeconds(response.headers),
         },
       )
     }
@@ -324,6 +334,7 @@ export class HttpClient {
             kind: 'http',
             details: backendError.details ?? text,
             requestId,
+            retryAfterSeconds: retryAfterSeconds(response.headers),
           },
         )
       }

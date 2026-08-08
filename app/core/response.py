@@ -39,6 +39,7 @@ def error_response(
     message: str,
     status_code: int,
     data: Any = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Build a failed JSON response using the same public envelope."""
 
@@ -46,4 +47,5 @@ def error_response(
     return JSONResponse(
         status_code=status_code,
         content=jsonable_encoder(payload, exclude_none=False),
+        headers=headers,
     )

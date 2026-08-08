@@ -37,6 +37,7 @@ from app.core.observability import (
     HTTP_REQUESTS,
 )
 from app.core.response import error_response, success_response
+from app.core.security import AuthRateLimiter
 from app.database.sqlite import init_database
 from app.services.runtime_coordinator import RuntimeCoordinator
 from app.services.job_handlers import build_default_job_handlers
@@ -138,9 +139,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", "Retry-After"],
     )
     application.state.settings = app_settings
+    application.state.auth_rate_limiter = AuthRateLimiter.from_settings(
+        app_settings
+    )
     application.dependency_overrides[get_settings] = lambda: app_settings
     _register_exception_handlers(application)
     _register_routes(application, app_settings.API_PREFIX)
@@ -238,6 +242,7 @@ def _register_exception_handlers(application: FastAPI) -> None:
             message=exc.message,
             status_code=exc.status_code,
             data=exc.data,
+            headers=exc.headers,
         )
 
     @application.exception_handler(RequestValidationError)

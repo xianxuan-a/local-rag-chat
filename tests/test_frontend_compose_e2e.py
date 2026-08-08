@@ -26,7 +26,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_ROOT = PROJECT_ROOT / "frontend"
 RUN_E2E = os.getenv("RUN_DOCKER_FRONTEND_E2E") == "1"
-BOOTSTRAP_SECRET = "isolated-real-api-bootstrap-secret-for-browser-tests"
+BOOTSTRAP_SECRET = "G5hczu_T4XWOLbPX2dYBzEDOQhP07qOW"
 
 
 def _free_port() -> int:

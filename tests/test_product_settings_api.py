@@ -10,9 +10,20 @@ from app.models import ProductSettings
 from tests.conftest import make_test_settings
 
 
-def test_settings_read_update_and_secret_redaction(client, app) -> None:
+def test_settings_read_update_and_secret_redaction(
+    client,
+    app,
+    test_settings,
+) -> None:
     initial = client.get("/api/settings")
     assert initial.status_code == 200
+    for name in (
+        "JWT_SECRET",
+        "METRICS_SCRAPE_TOKEN",
+        "BACKUP_SIGNING_KEY",
+        "BOOTSTRAP_SECRET",
+    ):
+        assert getattr(test_settings, name).get_secret_value() not in initial.text
     data = initial.json()["data"]
     assert data["source"] == "environment"
     assert "api_key" not in data

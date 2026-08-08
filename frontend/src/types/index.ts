@@ -68,6 +68,7 @@ export interface AppErrorShape {
   kind: AppErrorKind
   details?: unknown
   requestId?: string | null
+  retryAfterSeconds?: number | null
   originalCause?: unknown
 }
 
@@ -78,6 +79,7 @@ export class AppError extends Error implements AppErrorShape {
   readonly kind: AppErrorKind
   readonly details?: unknown
   readonly requestId?: string | null
+  readonly retryAfterSeconds?: number | null
   readonly originalCause?: unknown
 
   constructor(
@@ -89,6 +91,7 @@ export class AppError extends Error implements AppErrorShape {
       kind?: AppErrorKind
       details?: unknown
       requestId?: string | null
+      retryAfterSeconds?: number | null
       cause?: unknown
     } = {},
   ) {
@@ -100,6 +103,9 @@ export class AppError extends Error implements AppErrorShape {
     this.kind = options.kind ?? 'application'
     if ('details' in options) this.details = options.details
     if ('requestId' in options) this.requestId = options.requestId
+    if ('retryAfterSeconds' in options) {
+      this.retryAfterSeconds = options.retryAfterSeconds
+    }
     if ('cause' in options) this.originalCause = options.cause
   }
 }

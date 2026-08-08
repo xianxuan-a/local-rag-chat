@@ -13,6 +13,7 @@ def main() -> None:
         port=settings.PORT,
         reload=settings.DEBUG,
         workers=1,
+        access_log=False,
     )
 
 

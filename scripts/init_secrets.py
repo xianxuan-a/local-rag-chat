@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.core.cli import configure_utf8_stdio
+from app.core.config import production_secret_problem
 
 
 SECRET_NAMES = (
@@ -23,11 +24,30 @@ SECRET_NAMES = (
 )
 
 
+def _new_secret(name: str, reserved: set[str]) -> str:
+    """Generate one policy-compliant value that is unique in this env file."""
+
+    while True:
+        candidate = secrets.token_urlsafe(48)
+        if candidate in reserved:
+            continue
+        if production_secret_problem(name, candidate) is not None:
+            continue
+        reserved.add(candidate)
+        return candidate
+
+
 def initialize_secrets(env_file: Path) -> tuple[str, ...]:
     env_file = env_file.expanduser().resolve()
     env_file.parent.mkdir(parents=True, exist_ok=True)
     original = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
     lines = original.splitlines()
+    reserved = {
+        value.strip()
+        for line in lines
+        for key, separator, value in (line.partition("="),)
+        if separator and key.strip() in SECRET_NAMES and value.strip()
+    }
     generated: list[str] = []
     found: set[str] = set()
     output: list[str] = []
@@ -37,7 +57,9 @@ def initialize_secrets(env_file: Path) -> tuple[str, ...]:
         if separator and normalized_key in SECRET_NAMES:
             found.add(normalized_key)
             if not value.strip():
-                output.append(f"{normalized_key}={secrets.token_urlsafe(48)}")
+                output.append(
+                    f"{normalized_key}={_new_secret(normalized_key, reserved)}"
+                )
                 generated.append(normalized_key)
             else:
                 output.append(line)
@@ -45,7 +67,7 @@ def initialize_secrets(env_file: Path) -> tuple[str, ...]:
             output.append(line)
     for name in SECRET_NAMES:
         if name not in found:
-            output.append(f"{name}={secrets.token_urlsafe(48)}")
+            output.append(f"{name}={_new_secret(name, reserved)}")
             generated.append(name)
 
     content = os.linesep.join(output).rstrip() + os.linesep

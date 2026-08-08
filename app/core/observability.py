@@ -18,6 +18,11 @@ HTTP_DURATION = Histogram(
     "HTTP request duration by method and route template",
     ("method", "route"),
 )
+AUTH_RATE_LIMIT_EVENTS = Counter(
+    "local_rag_auth_rate_limit_events_total",
+    "Authentication requests rejected by endpoint and bounded dimension",
+    ("endpoint", "dimension"),
+)
 JOB_TERMINALS = Counter(
     "local_rag_jobs_terminal_total",
     "Jobs reaching a terminal status",

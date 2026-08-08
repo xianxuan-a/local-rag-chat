@@ -18,11 +18,13 @@ class AppException(Exception):
         code: int | None = None,
         status_code: int | None = None,
         data: Any = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.message = message or self.default_message
         self.status_code = status_code or self.default_status_code
         self.code = code if code is not None else self.status_code
         self.data = data
+        self.headers = headers or {}
         super().__init__(self.message)
 
 
@@ -44,6 +46,19 @@ class ConflictException(AppException):
 class PayloadTooLargeException(AppException):
     default_message = "上传内容超过大小限制"
     default_status_code = 413
+
+
+class RateLimitException(AppException):
+    default_message = "尝试次数过多，请稍后再试"
+    default_status_code = 429
+
+    def __init__(self, retry_after: int) -> None:
+        bounded_retry = max(1, retry_after)
+        super().__init__(
+            status_code=429,
+            data={"retry_after": bounded_retry},
+            headers={"Retry-After": str(bounded_retry)},
+        )
 
 
 class UnsupportedFileTypeException(AppException):

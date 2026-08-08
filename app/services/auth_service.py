@@ -19,6 +19,9 @@ from app.schemas.auth import BootstrapAdminRequest, LoginRequest, RegisterReques
 
 
 BOOTSTRAP_USER_ID = "00000000-0000-0000-0000-000000000001"
+_DUMMY_PASSWORD_HASH = (
+    "$2b$12$sYtZyNsCPUTHh5iNiZgLyeHo3vmuTcfmpBqQcmlB/6kmCNMptnRKu"
+)
 
 
 class AuthService:
@@ -96,10 +99,16 @@ class AuthService:
                 )
             )
         )
+        password_hash = (
+            user.password_hash
+            if user is not None and user.is_active
+            else _DUMMY_PASSWORD_HASH
+        )
+        password_valid = verify_password(payload.password, password_hash)
         if (
             user is None
             or not user.is_active
-            or not verify_password(payload.password, user.password_hash)
+            or not password_valid
         ):
             raise ValidationException(
                 "用户名/邮箱或密码错误", status_code=401
