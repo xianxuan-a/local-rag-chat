@@ -1,7 +1,17 @@
+# Installed dependencies and tool caches
 node_modules
+.vite
+
+# Generated build output
 dist
-dist-*
+dist-real
+dist-mock
+
+# Generated test, coverage, and browser reports
 artifacts
+coverage
 playwright-report
 test-results
+
+# npm-generated dependency lock
 package-lock.json

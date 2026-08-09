@@ -22,7 +22,7 @@
     "lint": "eslint . --max-warnings=0",
     "lint:colors": "node scripts/color-audit.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format:check": "node scripts/verify-format-contract.mjs && prettier --check .",
     "test:unit": "vitest run",
     "test:e2e": "playwright test"
   },
