@@ -35,7 +35,9 @@ VITE_API_TIMEOUT_MS=15000
 
 `VITE_API_MODE` 必须明确为 `mock` 或 `real`；非法或缺失会直接报配置错误。Real 模式请求失败时不会加载或回退 Mock。`VITE_API_BASE_URL` 接受绝对 HTTP(S) 地址或安全的单斜杠根相对路径；拒绝 `//host`、凭据、query 和 fragment。前端可见的 `VITE_*` 变量不得保存 Secret。
 
-`dev:real` 继续使用 `.env.real` 的 `http://127.0.0.1:8000`。标准 `npm run build` 等价于 `build:real`，固定以同源 `/` 构建，适用于仓库中的 Nginx 代理；Mock 只能由 `npm run build:mock` 显式生成。每个产物根目录都有确定性的 `build-meta.json`，发布系统可核验 `build_mode` 与 `production_deployable`。`npm run audit:real` 会扫描 manifest 当前模块图和实际产物，确认正式包不包含 Mock 标识、fixtures、Mock 上传路径或本地开发 API 地址。
+`dev:real` 继续使用 `.env.real` 的 `http://127.0.0.1:8000`。标准 `npm run build` 等价于 `build:real`，固定以同源 `/` 构建，适用于仓库中的 Nginx 代理；Mock 只能由 `npm run build:mock` 显式生成。每次构建由 Vite 在独立的 `dist-real` 或 `dist-mock` 中执行 `emptyOutDir` 清理，不共享目录。每个产物根目录都有确定性的 `build-meta.json`，发布系统可核验 `build_mode` 与 `production_deployable`。`npm run audit:real` 会扫描 manifest 当前模块图和实际产物，确认正式包不包含 Mock 标识、fixtures、Mock 上传路径或本地开发 API 地址。
+
+`npm run test:build` 会对 Real/Mock 各连续构建两次，比较完整文件清单与 SHA-256，并放入旧 chunk 哨兵验证构建前清理。`npm run analyze:bundle` 校验 manifest/index 引用、Dashboard 异步图表边界和 500 kB chunk 上限，并将 raw/gzip/brotli 统计写入 `artifacts/ci/bundle-report-*.json`。Dashboard 路由与基础指标先加载，ECharts/ZRender 仅在有图表数据时通过带 loading/error 状态的异步组件请求。
 
 Docker build context 使用 deny-by-default allowlist，只包含 package lock、Vite/TypeScript 构建配置、`src`、`public`、Real 构建审计脚本和 Nginx 配置；宿主 `node_modules`、`.env*`、dist、测试、截图与 Playwright 报告不会发送给构建器。Dockerfile 使用显式 `COPY`，依赖只能由 Linux builder 内的 `npm ci` 安装，最终非 root Nginx 镜像只复制 `dist-real`。
 
@@ -64,6 +66,8 @@ npm run test:unit
 npm run build
 npm run audit:real
 npm run build:mock
+npm run test:build
+npm run analyze:bundle
 npm run ci:build
 npm run test:e2e
 ```

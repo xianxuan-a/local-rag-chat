@@ -139,7 +139,9 @@ npm run dev:mock   # VITE_API_MODE=mock，仅使用隔离的内存 Mock Service
 npm run build          # 标准入口：Real
 npm run audit:real
 npm run build:mock     # 仅用于 Mock 开发/测试
-npm run ci:build       # CI：依次验证 Real 审计与显式 Mock 构建
+npm run test:build     # Real/Mock 各连续构建两次并验证旧 chunk 清理
+npm run analyze:bundle # manifest 完整性、Dashboard 分包统计与预算门禁
+npm run ci:build       # CI：确定性构建、Real 隔离审计与 bundle 预算
 ```
 
 GitHub Actions 的 `Frontend build` 工作流在推送到 `main`、Pull Request 和手动触发时执行同一门禁；工作流只授予仓库内容读取权限。
@@ -476,6 +478,8 @@ npm run test:unit
 npm run build
 npm run audit:real
 npm run build:mock
+npm run test:build
+npm run analyze:bundle
 npm run test:e2e
 ```
 

@@ -36,6 +36,9 @@ def test_ci_contract_covers_required_checks_and_security_boundaries() -> None:
     assert "permissions:\n  contents: read" in release
     assert "AUTH_REQUIRED=false" not in ci
     assert "secrets.DASHSCOPE_API_KEY" not in ci
+    assert "frontend-build-evidence-${{ github.sha }}" in ci
+    assert "bundle-report-real.json" in ci
+    assert "bundle-report-mock.json" in ci
     assert "pull_request:" not in release
     assert "environment: staging" in release
     assert "include-hidden-files: true" in release

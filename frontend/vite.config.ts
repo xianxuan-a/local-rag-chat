@@ -48,6 +48,24 @@ export default defineConfig(({ mode }) => {
       outDir: outputDirectory,
       emptyOutDir: true,
       manifest: true,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: 'zrender',
+                test: /[\\/]node_modules[\\/]zrender[\\/]/u,
+                priority: 40,
+              },
+              {
+                name: 'echarts',
+                test: /[\\/]node_modules[\\/]echarts[\\/]/u,
+                priority: 30,
+              },
+            ],
+          },
+        },
+      },
     },
     resolve: {
       alias: [

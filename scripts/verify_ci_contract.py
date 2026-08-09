@@ -30,6 +30,7 @@ def validate_workflows(ci: str, release: str) -> None:
         "npm run type-check",
         "npm run format:check",
         "npm run ci:build",
+        "bundle-report-real.json",
         "docker compose config -q",
         "RUN_DOCKER_COMPOSE_SMOKE: \"1\"",
         "RUN_DOCKER_FRONTEND_E2E: \"1\"",

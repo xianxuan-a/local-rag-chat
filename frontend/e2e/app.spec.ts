@@ -78,6 +78,27 @@ test('root redirect, nine business routes and 404 are reachable', async ({ page 
   await expect(page).toHaveURL(/\/dashboard$/u)
 })
 
+test('chart runtime stays deferred until Dashboard needs it', async ({ page }) => {
+  const chartAssetRequests: string[] = []
+  page.on('request', (request) => {
+    const url = request.url()
+    if (/\/assets\/(?:echarts|zrender)-[^/]+\.js$/u.test(url)) {
+      chartAssetRequests.push(url)
+    }
+  })
+
+  await page.goto('/chat')
+  await expect(page.getByRole('heading', { name: '智能问答', level: 1 })).toBeVisible()
+  expect(chartAssetRequests).toEqual([])
+
+  await page.goto('/dashboard')
+  await expect(
+    page.getByRole('img', { name: '最近七天真实活动趋势折线图' }),
+  ).toBeVisible()
+  await expect(page.getByRole('img', { name: '文件处理状态环形图' })).toBeVisible()
+  await expect.poll(() => chartAssetRequests.length).toBe(2)
+})
+
 test('sidebar, keyboard focus and 1024px chat sheets remain usable', async ({
   page,
 }) => {

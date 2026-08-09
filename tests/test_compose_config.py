@@ -157,8 +157,13 @@ def test_frontend_build_defaults_to_real_and_mock_is_explicit() -> None:
     assert scripts["build"] == "npm run build:real"
     assert scripts["build:mock"] == "vite build --mode mock"
     assert scripts["build:real"] == "node scripts/build-real.mjs"
+    assert scripts["test:build"] == "node scripts/verify-build-determinism.mjs"
+    assert scripts["analyze:bundle"] == (
+        "node scripts/analyze-build.mjs --mode real --enforce && "
+        "node scripts/analyze-build.mjs --mode mock --enforce"
+    )
     assert scripts["ci:build"] == (
-        "npm run build && npm run audit:real && npm run build:mock"
+        "npm run test:build && npm run audit:real && npm run analyze:bundle"
     )
     assert "VITE_API_MODE must be explicitly set to mock or real" in vite_config
     assert "BUILD_MODE=${apiMode}" in vite_config
