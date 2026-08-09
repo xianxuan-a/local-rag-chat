@@ -16,6 +16,8 @@ from scripts.verify_security_policy import verify_policy
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CI_PATH = PROJECT_ROOT / ".github" / "workflows" / "frontend-build.yml"
 RELEASE_PATH = PROJECT_ROOT / ".github" / "workflows" / "production-gate.yml"
+FRONTEND_PACKAGE_PATH = PROJECT_ROOT / "frontend" / "package.json"
+PRETTIER_IGNORE_PATH = PROJECT_ROOT / "frontend" / ".prettierignore"
 
 
 def _workflows() -> tuple[str, str]:
@@ -66,6 +68,43 @@ def test_ci_contract_rejects_unpinned_action_and_failure_masking() -> None:
         validate_workflows(ci.replace("@3d3c42e5aac5ba805825da76410c181273ba90b1", "@v7", 1), release)
     with pytest.raises(ValueError, match="forbidden"):
         validate_workflows(ci + "\ncontinue-on-error: true\n", release)
+
+
+def test_frontend_format_gate_is_narrow_and_fail_closed() -> None:
+    package = json.loads(FRONTEND_PACKAGE_PATH.read_text(encoding="utf-8"))
+    format_check = package["scripts"]["format:check"]
+    patterns = {
+        line.strip()
+        for line in PRETTIER_IGNORE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "verify-format-contract.mjs" in format_check
+    assert "prettier --check ." in format_check
+    assert {
+        "node_modules",
+        ".vite",
+        "dist",
+        "dist-real",
+        "dist-mock",
+        "artifacts",
+        "coverage",
+        "playwright-report",
+        "test-results",
+        "package-lock.json",
+    } == patterns
+    assert patterns.isdisjoint(
+        {
+            "src",
+            "src/**",
+            "e2e",
+            "e2e/**",
+            "*.ts",
+            "*.vue",
+            "package.json",
+            "vite.config.ts",
+        }
+    )
 
 
 def test_release_evidence_requires_every_gate_and_commit_bound_images() -> None:
