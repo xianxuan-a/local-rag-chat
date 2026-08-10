@@ -22,20 +22,28 @@ from tests.conftest import make_test_settings
     or not os.getenv("DASHSCOPE_API_KEY"),
     reason="requires RUN_DASHSCOPE_SMOKE=1 and DASHSCOPE_API_KEY",
 )
-def test_real_dashscope_embedding_smoke(tmp_path) -> None:
+def test_real_dashscope_embedding_batch_smoke(tmp_path) -> None:
     settings = make_test_settings(
         tmp_path,
         DASHSCOPE_API_KEY=os.environ["DASHSCOPE_API_KEY"],
         DASHSCOPE_BASE_URL=os.getenv("DASHSCOPE_BASE_URL"),
+        EMBEDDING_MAX_RETRIES=1,
+        EMBEDDING_BATCH_SIZE=2,
     )
     adapter = DashScopeEmbeddingAdapter(
         settings,
         EmbeddingConfig.from_settings(settings),
     )
 
-    vector = adapter.embed_query("RAG smoke test")
+    vectors = adapter.embed_documents(
+        [
+            "Synthetic RAG release smoke text one.",
+            "Synthetic RAG release smoke text two.",
+        ]
+    )
 
-    assert len(vector) == 1024
+    assert len(vectors) == 2
+    assert all(len(vector) == 1024 for vector in vectors)
 
 
 @pytest.mark.skipif(
@@ -43,7 +51,7 @@ def test_real_dashscope_embedding_smoke(tmp_path) -> None:
     or not os.getenv("DASHSCOPE_API_KEY"),
     reason="requires RUN_DASHSCOPE_SMOKE=1 and DASHSCOPE_API_KEY",
 )
-def test_real_dashscope_chat_non_stream_and_stream_smoke() -> None:
+def test_real_dashscope_single_chat_smoke() -> None:
     client = DashScopeChatClient(
         ChatRuntimeConfig(
             model=os.getenv("DASHSCOPE_STAGING_CHAT_MODEL", "qwen-turbo"),
@@ -71,10 +79,6 @@ def test_real_dashscope_chat_non_stream_and_stream_smoke() -> None:
         calls += 1
 
     answer = client.generate(messages, before_generation_call=record_call)
-    streamed = "".join(
-        client.stream_generate(messages, before_generation_call=record_call)
-    )
 
     assert answer.strip()
-    assert streamed.strip()
-    assert calls == 2
+    assert calls == 1

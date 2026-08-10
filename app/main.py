@@ -26,6 +26,7 @@ from app.api import (
     retrieval,
     sessions,
     settings as settings_api,
+    users,
 )
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AppException
@@ -36,7 +37,7 @@ from app.core.observability import (
     HTTP_ERRORS,
     HTTP_REQUESTS,
 )
-from app.core.response import error_response, success_response
+from app.core.response import error_response
 from app.core.security import AuthRateLimiter
 from app.database.sqlite import init_database
 from app.services.runtime_coordinator import RuntimeCoordinator
@@ -162,6 +163,7 @@ def _register_routes(application: FastAPI, api_prefix: str) -> None:
     application.include_router(knowledge_base.router, prefix=api_prefix)
     application.include_router(files.router, prefix=api_prefix)
     application.include_router(settings_api.router, prefix=api_prefix)
+    application.include_router(users.router, prefix=api_prefix)
     application.include_router(retrieval.router, prefix=api_prefix)
     application.include_router(chat.router, prefix=api_prefix)
     application.include_router(sessions.router, prefix=api_prefix)

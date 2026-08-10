@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from sqlalchemy.orm import Session
 from langchain_core.embeddings import Embeddings
 
 from app.models import FileRecord, FileStatus, KnowledgeBase

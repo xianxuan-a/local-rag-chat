@@ -31,7 +31,7 @@ settings = Settings(
     _env_file=None,
     ENVIRONMENT="production",
     AUTH_REQUIRED=True,
-    ALLOW_REGISTRATION=False,
+    ALLOW_REGISTRATION=True,
     LOG_DIR=artifact_root / "logs",
     DATA_DIR=data_dir,
     UPLOAD_DIR=data_dir / "uploads",
@@ -137,3 +137,16 @@ def deterministic_internal_error() -> None:
     """Expose a test-only 500 to verify proxy status preservation."""
 
     raise RuntimeError("deterministic integration failure")
+
+
+@app.get("/api/_test/slow")
+def deterministic_slow_response(seconds: int = 15) -> dict[str, object]:
+    """Expose a bounded synchronous delay to verify the Nginx API timeout."""
+
+    bounded_seconds = min(max(seconds, 0), 60)
+    time.sleep(bounded_seconds)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {"seconds": bounded_seconds},
+    }

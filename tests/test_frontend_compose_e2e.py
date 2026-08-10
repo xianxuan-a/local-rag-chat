@@ -87,7 +87,7 @@ def _request(
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     try:
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=70) as response:
             return response.status, dict(response.headers.items()), response.read()
     except HTTPError as error:
         return error.code, dict(error.headers.items()), error.read()
@@ -125,10 +125,15 @@ def _run_playwright(base_url: str, token: str, *, backend_down: bool) -> None:
             "NEXUS_REAL_API_ACCESS_TOKEN": token,
             "NEXUS_EXPECT_BACKEND_DOWN": "1" if backend_down else "0",
             "NEXUS_REAL_API_KB_NAME": f"compose-real-{uuid4().hex[:10]}",
+            "NEXUS_REAL_REGISTRATION_E2E": "0" if backend_down else "1",
+            "NEXUS_REAL_REGISTRATION_USERNAME": f"registered-{uuid4().hex[:10]}",
         }
     )
+    test_files = ["real-api.spec.ts"]
+    if not backend_down:
+        test_files.append("auth-registration-real.spec.ts")
     result = subprocess.run(
-        [npm, "run", "test:e2e", "--", "real-api.spec.ts"],
+        [npm, "run", "test:e2e", "--", *test_files],
         cwd=FRONTEND_ROOT,
         env=environment,
         capture_output=True,
@@ -172,7 +177,15 @@ def test_vue_real_container_proxy_and_browser_chain(tmp_path: Path) -> None:
 
     try:
         if os.getenv("FRONTEND_E2E_SKIP_BUILD") != "1":
-            _compose(docker, project, env_file, "build", "--no-cache", "frontend")
+            _compose(
+                docker,
+                project,
+                env_file,
+                "build",
+                "--no-cache",
+                "backend",
+                "frontend",
+            )
         _compose(docker, project, env_file, "up", "-d", "frontend")
         _wait_for_frontend(base_url)
 
@@ -218,6 +231,15 @@ def test_vue_real_container_proxy_and_browser_chain(tmp_path: Path) -> None:
         assert status == 500
         assert "json" in headers.get("Content-Type", "")
         assert b"<html" not in body.lower()
+
+        slow_started = time.monotonic()
+        status, headers, body = _request(
+            f"{base_url}/api/_test/slow?seconds=15"
+        )
+        assert status == 200
+        assert time.monotonic() - slow_started >= 14.5
+        assert "json" in headers.get("Content-Type", "")
+        assert _json(body)["data"] == {"seconds": 15}
 
         status, _, body = _request(
             f"{base_url}/api/auth/bootstrap",

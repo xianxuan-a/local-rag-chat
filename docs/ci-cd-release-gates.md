@@ -8,6 +8,7 @@
 
 | Job | 覆盖范围 |
 | --- | --- |
+| `Python Ruff quality` | 独立安装 `requirements-dev.lock` 中的 Ruff 0.15.13，执行 E4/E7/E9/F 静态检查；开发工具不进入生产镜像 |
 | `Backend locked tests` | Python 3.11.15、锁文件安装、pip check、compileall、完整 pytest |
 | `Alembic fresh and round-trip` | fresh upgrade、downgrade/upgrade、离线恢复与最终切换契约 |
 | `Frontend static and unit` | Node 24.14.0、npm ci、type-check、lint、颜色、Prettier、Vitest |
@@ -60,6 +61,8 @@ Fork PR 只触发基础 `CI`，不会触发 production workflow，也不会引�
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pip install --requirement requirements-dev.lock
+.\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m compileall -q app scripts ui tests
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts/verify_security_policy.py
@@ -80,6 +83,8 @@ Docker smoke、Mock E2E 和 Real E2E 命令见根 README 的完整验证段落�
 
 ## 依赖安全例外
 
-`security/pip-audit-policy.json` 是唯一允许的 pip-audit 例外来源。每项必须绑定锁文件中的准确版本、公开跟踪地址、具体隔离措施和不超过 45 天的到期日；`verify_security_policy.py` 在到期当天 fail closed。
+`security/pip-audit-policy.json` 是唯一允许的 pip-audit 例外来源。每项必须绑定锁文件中的准确版本、公开跟踪地址、具体隔离措施和不超过 30 天的到期日；`verify_security_policy.py` 在到期当天 fail closed。
+
+ChromaDB 例外还必须声明责任人和复审日。当前责任人为 `repository-maintainers`，复审日为 2026-08-25，到期日为 2026-09-01；脚本在复审日或到期日当天 fail closed。`verify_chroma_boundary.py` 同时禁止生产代码使用 `HttpClient`、`AsyncHttpClient`、`chromadb.app`、server CLI、Chroma Compose 服务或服务端镜像，并要求保留本地 `PersistentClient`。如果出现不受影响的稳定版，必须升级并完成向量兼容、重建、回滚和全量门禁；若仍无修复版，只能重新审批并最多延长 30 天，且不得削弱本地隔离条件。
 
 当前 ChromaDB 1.5.9 公告影响 Python HTTP server 和连接不可信服务器的 HttpClient。项目只使用本地 `PersistentClient`、应用自有 collection 配置和显式 Embedding，不启动 Chroma HTTP server。该临时例外于 2026-09-01 到期；届时若没有稳定修复版本，CI 将阻止合并和发布。

@@ -15,6 +15,7 @@ from scripts.verify_release_baseline import (
     is_ignored,
     readme_link_errors,
     scan_secret_contents,
+    version_consistency_errors,
 )
 
 
@@ -89,4 +90,21 @@ def test_readme_local_links_and_migration_head_are_release_tracked() -> None:
     tracked = set(result.stdout.splitlines())
     assert readme_link_errors(PROJECT_ROOT, tracked) == []
     assert "alembic/versions/0007_retrieval_modes.py" in tracked
-    assert head_revision() == "0007_retrieval_modes"
+    assert "alembic/versions/0008_user_identities.py" in tracked
+    assert "alembic/versions/0009_user_admin_audit.py" in tracked
+    assert head_revision() == "0009_user_admin_audit"
+
+
+def test_application_frontend_and_image_versions_are_consistent() -> None:
+    assert version_consistency_errors(PROJECT_ROOT) == []
+
+
+def test_license_notice_and_quality_tool_lock_are_release_ready() -> None:
+    license_text = (PROJECT_ROOT / "LICENSE").read_text(encoding="utf-8")
+    notice_text = (PROJECT_ROOT / "NOTICE").read_text(encoding="utf-8")
+    dev_lock = (PROJECT_ROOT / "requirements-dev.lock").read_text(encoding="utf-8")
+
+    assert "Apache License" in license_text
+    assert "Version 2.0, January 2004" in license_text
+    assert "Copyright 2026 local-rag-chat contributors" in notice_text
+    assert dev_lock.splitlines() == ["ruff==0.15.13"]

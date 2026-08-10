@@ -14,6 +14,7 @@ import {
   Settings,
   Sparkles,
   UserRound,
+  UsersRound,
 } from 'lucide-vue-next'
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
@@ -53,7 +54,12 @@ const navigation = [
   { to: '/indexes', label: '索引管理', icon: Layers3 },
   { to: '/evaluation', label: 'RAG 评测', icon: FlaskConical },
   { to: '/settings', label: '系统设置', icon: Settings },
+  { to: '/users', label: '用户管理', icon: UsersRound, adminOnly: true },
 ]
+
+const visibleNavigation = computed(() =>
+  navigation.filter((item) => !item.adminOnly || authStore.isAdmin),
+)
 
 const collapsed = computed(() => !props.mobile && appStore.sidebarCollapsed)
 const accountName = computed(() => authStore.user?.username ?? '认证会话')
@@ -123,7 +129,7 @@ onMounted(() => {
 
     <div class="nav-label">工作区</div>
     <nav class="sidebar-nav">
-      <AppTooltip v-for="item in navigation" :key="item.to" :text="item.label">
+      <AppTooltip v-for="item in visibleNavigation" :key="item.to" :text="item.label">
         <RouterLink class="nav-item" :to="item.to" @click="emit('navigate')">
           <component :is="item.icon" :size="16" aria-hidden="true" />
           <span class="nav-item-copy">{{ item.label }}</span>

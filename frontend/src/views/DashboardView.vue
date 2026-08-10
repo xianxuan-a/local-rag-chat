@@ -14,9 +14,9 @@ import type { EChartsCoreOption } from 'echarts/core'
 
 import { apiConfig } from '@/api/client'
 import { dashboardApi } from '@/api/dashboardApi'
-import BaseChart from '@/components/common/BaseChart.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ErrorState from '@/components/common/ErrorState.vue'
+import LazyBaseChart from '@/components/common/LazyBaseChart.vue'
 import LoadingState from '@/components/common/LoadingState.vue'
 import MetricCard from '@/components/common/MetricCard.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -302,7 +302,7 @@ onBeforeUnmount(() => controller?.abort())
               </span>
             </div>
             <div class="card-body">
-              <BaseChart
+              <LazyBaseChart
                 v-if="trendHasData"
                 :option="lineOption"
                 ariaLabel="最近七天真实活动趋势折线图"
@@ -325,7 +325,7 @@ onBeforeUnmount(() => controller?.abort())
               </RouterLink>
             </div>
             <div class="card-body">
-              <BaseChart
+              <LazyBaseChart
                 v-if="fileTotal > 0"
                 :option="donutOption"
                 ariaLabel="文件处理状态环形图"

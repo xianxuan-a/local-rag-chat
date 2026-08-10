@@ -34,8 +34,15 @@ const deleteTarget = ref<FileRecord | null>(null)
 const deleting = ref(false)
 const controllers = new Map<string, AbortController>()
 const processingProgress = ref<Record<string, number>>({})
+const pageLimit = 50
+const pageOffset = ref(0)
+const totalFiles = ref(0)
 let listController: AbortController | null = null
 let listRequestVersion = 0
+
+const hasPreviousPage = computed(() => pageOffset.value > 0)
+const hasNextPage = computed(() => pageOffset.value + pageLimit < totalFiles.value)
+const currentPage = computed(() => Math.floor(pageOffset.value / pageLimit) + 1)
 
 const filtered = computed(() => {
   const keyword = search.value.trim().toLowerCase()
@@ -66,6 +73,7 @@ async function load(isRefresh = false): Promise<void> {
   const requestVersion = ++listRequestVersion
   if (!knowledgeBaseId) {
     files.value = []
+    totalFiles.value = 0
     loading.value = false
     return
   }
@@ -75,12 +83,15 @@ async function load(isRefresh = false): Promise<void> {
   try {
     const result = await fileApi.list(knowledgeBaseId, {
       signal: controller.signal,
+      limit: pageLimit,
+      offset: pageOffset.value,
     })
     if (
       requestVersion === listRequestVersion &&
       knowledgeBaseStore.currentId === knowledgeBaseId
     ) {
-      files.value = result
+      files.value = result.items
+      totalFiles.value = result.total
     }
   } catch (caught) {
     if (!isCancellationError(caught) && requestVersion === listRequestVersion) {
@@ -92,6 +103,18 @@ async function load(isRefresh = false): Promise<void> {
       refreshing.value = false
     }
   }
+}
+
+async function previousPage(): Promise<void> {
+  if (!hasPreviousPage.value) return
+  pageOffset.value = Math.max(0, pageOffset.value - pageLimit)
+  await load()
+}
+
+async function nextPage(): Promise<void> {
+  if (!hasNextPage.value) return
+  pageOffset.value += pageLimit
+  await load()
 }
 
 async function upload(selected: File[]): Promise<void> {
@@ -183,6 +206,7 @@ watch(
   () => {
     for (const controller of controllers.values()) controller.abort()
     controllers.clear()
+    pageOffset.value = 0
     void load()
   },
 )
@@ -282,7 +306,9 @@ onBeforeUnmount(() => {
               </AppButton>
             </div>
             <div class="toolbar-group">
-              <span class="badge badge-light">共 {{ filtered.length }} 个文件</span>
+              <span class="badge badge-light">
+                当前 {{ filtered.length }} / 共 {{ totalFiles }} 个文件
+              </span>
               <AppButton variant="primary" @click="uploadOpen = true">
                 <Upload :size="14" aria-hidden="true" />
                 上传文件
@@ -309,6 +335,22 @@ onBeforeUnmount(() => {
             @process="process"
             @remove="deleteTarget = $event"
           />
+          <div
+            v-if="totalFiles > pageLimit"
+            style="
+              display: flex;
+              justify-content: flex-end;
+              align-items: center;
+              gap: 8px;
+              margin-top: 12px;
+            "
+          >
+            <span class="compact-meta">第 {{ currentPage }} 页</span>
+            <AppButton :disabled="!hasPreviousPage" @click="previousPage">
+              上一页
+            </AppButton>
+            <AppButton :disabled="!hasNextPage" @click="nextPage">下一页</AppButton>
+          </div>
         </section>
 
         <div v-if="failedFile" class="error-banner">

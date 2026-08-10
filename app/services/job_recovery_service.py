@@ -9,7 +9,6 @@ from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 
-from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings

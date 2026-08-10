@@ -14,6 +14,7 @@ PIN_PATTERN = re.compile(r"uses:\s+[^\s@]+@[0-9a-f]{40}\s+#")
 
 def validate_workflows(ci: str, release: str) -> None:
     required_ci = (
+        "python-quality:",
         "backend:",
         "migrations:",
         "frontend:",
@@ -24,15 +25,19 @@ def validate_workflows(ci: str, release: str) -> None:
         "real-e2e:",
         "security:",
         "required-checks:",
+        "python -m pip install --requirement requirements-dev.lock",
+        "python -m ruff check .",
         "python -m pip check",
         "python -m compileall",
         "python -m pytest",
         "npm run type-check",
         "npm run format:check",
         "npm run ci:build",
+        "bundle-report-real.json",
         "docker compose config -q",
         "RUN_DOCKER_COMPOSE_SMOKE: \"1\"",
         "RUN_DOCKER_FRONTEND_E2E: \"1\"",
+        "python scripts/verify_chroma_boundary.py",
     )
     required_release = (
         "workflow_dispatch:",
@@ -40,6 +45,10 @@ def validate_workflows(ci: str, release: str) -> None:
         "environment: staging",
         "secrets.DASHSCOPE_API_KEY",
         "RUN_DASHSCOPE_SMOKE: \"1\"",
+        "release-security:",
+        "python scripts/verify_security_policy.py",
+        "python scripts/verify_chroma_boundary.py",
+        "ignore-vulns: PYSEC-2026-311",
         "recovery-drill:",
         "production-images:",
         "--build-arg VCS_REF=${GITHUB_SHA}",

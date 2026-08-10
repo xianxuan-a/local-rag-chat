@@ -21,6 +21,9 @@ export const useAuthStore = defineStore('auth', () => {
   const isAuthenticated = computed(
     () => apiConfig.mode === 'mock' || hasAccessToken.value,
   )
+  const isAdmin = computed(
+    () => apiConfig.mode === 'mock' || user.value?.role === 'ADMIN',
+  )
 
   async function initialize(): Promise<void> {
     if (initialized.value) return
@@ -100,6 +103,7 @@ export const useAuthStore = defineStore('auth', () => {
     status,
     authenticating,
     isAuthenticated,
+    isAdmin,
     initialize,
     login,
     register,

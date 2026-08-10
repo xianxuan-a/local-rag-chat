@@ -23,6 +23,8 @@ REQUIRED_PATHS = frozenset(
         ".gitattributes",
         ".gitignore",
         "Dockerfile",
+        "LICENSE",
+        "NOTICE",
         "README.md",
         "alembic.ini",
         "docker-compose.e2e.yml",
@@ -37,15 +39,18 @@ REQUIRED_PATHS = frozenset(
         "frontend/.gitignore",
         "frontend/Dockerfile",
         "frontend/README.md",
-        "frontend/nginx.conf",
+        "frontend/nginx.conf.template",
         "frontend/package-lock.json",
         "frontend/package.json",
         "frontend/playwright.config.ts",
         "frontend/vite.config.ts",
         "frontend/vitest.config.ts",
         "requirements.lock",
+        "requirements-dev.lock",
         "requirements.txt",
+        "ruff.toml",
         "run.py",
+        "scripts/verify_chroma_boundary.py",
         "scripts/verify_release_baseline.py",
         "tests/test_release_baseline.py",
         "启动项目.cmd",
@@ -142,6 +147,8 @@ LOCAL_MACHINE_PATH_PATTERNS = (
     re.compile(r"[A-Za-z]:\\Users\\[^\\\s]+", re.IGNORECASE),
     re.compile(r"/(?:Users|home)/[^/\s]+/(?:Desktop|Downloads)/"),
 )
+
+RELEASE_VERSION = "0.1.0"
 
 
 def _git(root: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -280,6 +287,55 @@ def readme_link_errors(root: Path, tracked: set[str]) -> list[str]:
     return errors
 
 
+def version_consistency_errors(root: Path) -> list[str]:
+    errors: list[str] = []
+    app_text = (root / "app" / "__init__.py").read_text(encoding="utf-8")
+    app_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', app_text, re.M)
+    config_text = (root / "app" / "core" / "config.py").read_text(encoding="utf-8")
+    config_match = re.search(
+        r'^\s*APP_VERSION:\s*str\s*=\s*["\']([^"\']+)["\']',
+        config_text,
+        re.M,
+    )
+    package = json.loads((root / "frontend" / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads(
+        (root / "frontend" / "package-lock.json").read_text(encoding="utf-8")
+    )
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    observed = {
+        "app/__init__.py": app_match.group(1) if app_match else "<missing>",
+        "app/core/config.py": (
+            config_match.group(1) if config_match else "<missing>"
+        ),
+        "frontend/package.json": str(package.get("version", "<missing>")),
+        "frontend/package-lock.json": str(lock.get("version", "<missing>")),
+        "frontend/package-lock.json packages root": str(
+            lock.get("packages", {}).get("", {}).get("version", "<missing>")
+        ),
+    }
+    for source, value in observed.items():
+        if value != RELEASE_VERSION:
+            errors.append(
+                f"version mismatch in {source}: {value!r}, expected {RELEASE_VERSION!r}"
+            )
+    for variable in ("APP_VERSION", "IMAGE_TAG"):
+        if not re.search(
+            rf'^{variable}=["\']?{re.escape(RELEASE_VERSION)}["\']?$',
+            env_example,
+            re.M,
+        ):
+            errors.append(f".env.example does not pin {variable}={RELEASE_VERSION}")
+    required_compose_defaults = (
+        f"${{IMAGE_TAG:-{RELEASE_VERSION}}}",
+        f"${{APP_VERSION:-{RELEASE_VERSION}}}",
+    )
+    for default in required_compose_defaults:
+        if default not in compose:
+            errors.append(f"docker-compose.yml is missing version default {default}")
+    return errors
+
+
 def audit_repository(root: Path, *, require_clean: bool = False) -> dict[str, object]:
     root = root.resolve()
     tracked = set(_git_paths(root, "ls-files"))
@@ -307,6 +363,7 @@ def audit_repository(root: Path, *, require_clean: bool = False) -> dict[str, ob
             errors.append(f"source/config path is covered by ignore rules: {path}")
 
     errors.extend(readme_link_errors(root, tracked))
+    errors.extend(version_consistency_errors(root))
     secret_findings = scan_secret_contents(tracked_contents(root, tracked))
     errors.extend(
         f"{finding['rule']} at {finding['path']}:{finding['line']}"

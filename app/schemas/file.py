@@ -115,6 +115,13 @@ class FileUploadResponse(FileRecordResponse):
         )
 
 
+class FileRecordPage(BaseModel):
+    items: list[FileRecordResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class FileStatusResponse(BaseModel):
     """A compact file-processing status response."""
 

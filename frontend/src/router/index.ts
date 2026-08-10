@@ -3,6 +3,13 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { apiConfig } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
+declare module 'vue-router' {
+  interface RouteMeta {
+    requiresAuth?: boolean
+    adminOnly?: boolean
+  }
+}
+
 export function safeInternalRedirect(value: unknown, fallback = '/dashboard'): string {
   if (typeof value !== 'string' || !value.startsWith('/')) {
     return fallback
@@ -86,6 +93,12 @@ const router = createRouter({
           name: 'settings',
           component: () => import('@/views/SettingsView.vue'),
         },
+        {
+          path: 'users',
+          name: 'users',
+          component: () => import('@/views/UsersView.vue'),
+          meta: { adminOnly: true },
+        },
       ],
     },
     {
@@ -119,6 +132,10 @@ router.beforeEach(async (to) => {
       query: { redirect: safeInternalRedirect(to.fullPath) },
       replace: true,
     }
+  }
+
+  if (to.matched.some((record) => record.meta.adminOnly) && !authStore.isAdmin) {
+    return { path: '/dashboard', query: { permission: 'denied' }, replace: true }
   }
 
   return true

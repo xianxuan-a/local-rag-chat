@@ -65,7 +65,7 @@ jobs:
           fi
       - name: Verify provider error handling without network
         run: python -m pytest -q tests/test_embedding_service.py tests/test_chat_model_service.py
-      - name: Run minimum-cost real embedding, chat and stream checks
+      - name: Run one real chat and one two-text embedding batch
         if: steps.credential.outputs.available == 'true'
         env:
           RUN_DASHSCOPE_SMOKE: "1"
@@ -78,6 +78,38 @@ jobs:
         run: |
           echo "::error::Protected staging secret DASHSCOPE_API_KEY is unavailable."
           exit 1
+
+  release-security:
+    name: Release dependency and Chroma security
+    needs: source-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify time-limited security exception
+        run: python scripts/verify_security_policy.py
+      - name: Verify local-only Chroma boundary
+        run: python scripts/verify_chroma_boundary.py
+      - name: Audit Python lock
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.lock
+          no-deps: true
+          disable-pip: true
+          ignore-vulns: PYSEC-2026-311
+      - name: Audit npm lock at high severity
+        run: npm audit --audit-level=high
+        working-directory: frontend
+      - name: Verify release and workflow contracts
+        run: |
+          python scripts/verify_release_baseline.py
+          python scripts/verify_ci_contract.py
 
   deterministic-real-e2e:
     name: Release Vue Real chain
@@ -139,6 +171,7 @@ jobs:
       - dashscope-staging
       - deterministic-real-e2e
       - recovery-drill
+      - release-security
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

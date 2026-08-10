@@ -11,7 +11,7 @@
 !tsconfig.app.json
 !tsconfig.node.json
 !vite.config.ts
-!nginx.conf
+!nginx.conf.template
 
 !public/
 !public/**

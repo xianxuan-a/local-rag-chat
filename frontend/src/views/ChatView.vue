@@ -39,6 +39,7 @@ import type {
 } from '@/types'
 import { isAbortError } from '@/utils/abort'
 import { getErrorMessage } from '@/utils/error'
+import { latestAssistantSources } from '@/utils/chatSources'
 
 const route = useRoute()
 const router = useRouter()
@@ -58,6 +59,7 @@ const sessionSheetOpen = ref(false)
 const sourcesSheetOpen = ref(false)
 const selectedSource = ref<SourceReference | null>(null)
 const currentSources = ref<SourceReference[]>([])
+const sourceMessageId = ref<string | null>(null)
 const selectedMode = ref<RetrievalMode>('knowledge_first')
 const deleteTarget = ref<ChatSession | null>(null)
 const deleting = ref(false)
@@ -173,16 +175,15 @@ async function loadMessages(
       return
     }
     messages.value = response
-    currentSources.value =
-      [...messages.value]
-        .reverse()
-        .find((message) => message.role === 'assistant' && message.sources.length > 0)
-        ?.sources ?? []
+    const activeSources = latestAssistantSources(messages.value)
+    sourceMessageId.value = activeSources.messageId
+    currentSources.value = activeSources.sources
     await scrollToBottom()
   } catch (caught) {
     if (isAbortError(caught) || requestVersion !== messageRequestVersion) return
     toast.error(getErrorMessage(caught))
     messages.value = []
+    sourceMessageId.value = null
     currentSources.value = []
   } finally {
     if (requestVersion === messageRequestVersion) {
@@ -209,6 +210,7 @@ async function createSession(): Promise<void> {
   try {
     const session = await sessionStore.create(knowledgeBaseStore.currentId)
     messages.value = []
+    sourceMessageId.value = null
     currentSources.value = []
     sessionSheetOpen.value = false
     toast.success('新会话已创建')
@@ -239,6 +241,7 @@ async function confirmDelete(): Promise<void> {
       await loadMessages(sessionStore.current.id, sessionStore.current.knowledgeBaseId)
     } else {
       messages.value = []
+      sourceMessageId.value = null
       currentSources.value = []
       await router.replace({ path: '/chat' })
     }
@@ -326,6 +329,7 @@ async function sendQuestion(question = input.value.trim()): Promise<void> {
     assistantMessageId: null,
   }
   currentSources.value = []
+  sourceMessageId.value = null
   const controller = new AbortController()
   generationController.value = controller
   await scrollToBottom()
@@ -346,6 +350,7 @@ async function sendQuestion(question = input.value.trim()): Promise<void> {
           if (streamDraft.value !== undefined) {
             streamDraft.value.assistantMessageId = event.assistantMessageId
           }
+          sourceMessageId.value = event.assistantMessageId
           if (generationTarget.value !== null) {
             generationTarget.value.assistantMessageId = event.assistantMessageId
           }
@@ -361,7 +366,9 @@ async function sendQuestion(question = input.value.trim()): Promise<void> {
         },
         onSources: (sources) => {
           if (!generationMatches(requestVersion, sessionId, knowledgeBaseId)) return
-          currentSources.value = sources
+          if (sourceMessageId.value === streamDraft.value?.assistantMessageId) {
+            currentSources.value = sources
+          }
         },
       },
     )
@@ -438,11 +445,9 @@ async function stopGeneration(): Promise<void> {
     }
     if (matchesCurrentContext(target.sessionId, target.knowledgeBaseId)) {
       messages.value = latestMessages
-      currentSources.value =
-        [...latestMessages]
-          .reverse()
-          .find((message) => message.role === 'assistant' && message.sources.length > 0)
-          ?.sources ?? []
+      const activeSources = latestAssistantSources(latestMessages)
+      sourceMessageId.value = activeSources.messageId
+      currentSources.value = activeSources.sources
       await scrollToBottom()
     }
   } catch (caught) {
@@ -468,6 +473,7 @@ async function retry(message: ChatMessage): Promise<void> {
   const requestVersion = generationRequestVersion
   generating.value = true
   currentSources.value = []
+  sourceMessageId.value = message.id
   streamDraft.value = {
     question: null,
     content: '',
@@ -505,7 +511,7 @@ async function retry(message: ChatMessage): Promise<void> {
         },
         onSources: (sources) => {
           if (!generationMatches(requestVersion, sessionId, knowledgeBaseId)) return
-          currentSources.value = sources
+          if (sourceMessageId.value === message.id) currentSources.value = sources
         },
       },
     )
@@ -612,7 +618,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page chat-page">
+  <div
+    class="page chat-page"
+    :data-generation-state="generating ? 'active' : 'idle'"
+    :data-source-message-id="sourceMessageId ?? ''"
+  >
     <PageHeader
       title="智能问答"
       description="基于当前知识库进行可追溯、有来源的 RAG 问答"

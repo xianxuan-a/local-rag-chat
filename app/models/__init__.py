@@ -26,6 +26,8 @@ from app.models.job import (
     TERMINAL_JOB_STATUSES,
 )
 from app.models.user import User, UserRole
+from app.models.user_identity import UserIdentity
+from app.models.user_admin_audit_event import UserAdminAuditEvent
 from app.models.product_settings import ProductSettings
 from app.models.message_feedback import FeedbackValue, MessageFeedback
 
@@ -52,6 +54,8 @@ __all__ = [
     "TimestampMixin",
     "UTCDateTime",
     "User",
+    "UserIdentity",
+    "UserAdminAuditEvent",
     "UserRole",
     "UUIDPrimaryKeyMixin",
     "new_uuid",

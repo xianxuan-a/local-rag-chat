@@ -10,11 +10,13 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppSwitch from '@/components/ui/AppSwitch.vue'
 import { useSettingsStore } from '@/stores/settings'
+import { useAuthStore } from '@/stores/auth'
 import type { AppSettings, RetrievalMode } from '@/types'
 import { getErrorDetail, getErrorMessage, isCancellationError } from '@/utils/error'
 import { formatDateTime } from '@/utils/format'
 
 const settingsStore = useSettingsStore()
+const authStore = useAuthStore()
 const error = ref<unknown>(null)
 const validationErrors = ref<Record<string, string>>({})
 const controller = new AbortController()
@@ -151,7 +153,7 @@ onBeforeUnmount(() => controller.abort())
 <template>
   <div class="page">
     <PageHeader title="系统设置" description="管理服务器持久化的安全业务参数">
-      <template #actions>
+      <template v-if="authStore.isAdmin" #actions>
         <AppButton :disabled="settings === null" @click="discard">
           <RotateCcw :size="14" aria-hidden="true" />
           撤销未保存修改

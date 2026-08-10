@@ -10,7 +10,8 @@
 - `alembic.ini`、`alembic/env.py` 和全部 `alembic/versions/`；
 - `tests/`、`scripts/`、三个 Windows CMD 入口和 `run.py`；
 - Dockerfile、Compose、Nginx、Vite、Vitest、Playwright 配置；
-- `requirements.txt`、`requirements.lock`、`frontend/package.json` 和 `frontend/package-lock.json`；
+- `requirements.txt`、`requirements.lock`、`requirements-dev.lock`、`ruff.toml`、`frontend/package.json` 和 `frontend/package-lock.json`；
+- Apache-2.0 `LICENSE`、`NOTICE` 和保留的项目资源 `RAG.png`；
 - README、`docs/`、`.env.example`、前端公开的模式配置与 `data/**/.gitkeep`。
 
 必须忽略：
@@ -23,13 +24,14 @@
 需要用户确认：
 
 - 来源不明的业务数据、截图、报告或大文件不能自动删除、忽略或提交；
-- 当前两个 PNG（`RAG.png` 与 `ChatGPT Image 2026年7月22日 01_55_53.png`）内容相同、单个 1,861,411 bytes，均低于 10 MiB 门禁。它们在 D-005 中保持既有 tracked 状态，后续是否合并由用户决定。
+- `RAG.png` 是保留的项目图片。曾与它逐字节相同且无有效引用的 `ChatGPT Image 2026年7月22日 01_55_53.png` 已按明确审核计划精确删除，未执行批量清理。
 
 ## 依赖与工具
 
 - Python：支持 3.11+；容器发布 runtime 为 3.11.15。
 - Node.js：`^20.19.0 || >=22.12.0`；容器 builder 为 Node 24 Alpine。
 - npm：10+；`packageManager` 记录 npm 11.9.0，lockfileVersion 为 3。
+- Ruff：开发/CI 固定为 0.15.13，只检查 E4/E7/E9/F；不安装进生产镜像。
 - Docker Engine：24+；Docker Compose：2.20+；Git：2.39+。
 
 D-005 建立时的实际验证工具为 Python 3.13.13、pip 26.1.1、Node 24.14.0、npm 11.9.0、Docker Engine 29.3.1、Docker Compose 5.1.1 和 Git 2.54.0.windows.1。最低支持范围不是对所有旧版本的穷举测试；精确发布证据以最终 commit 的 CI/验收记录为准。
@@ -43,7 +45,10 @@ D-005 建立时的实际验证工具为 Python 3.13.13、pip 26.1.1、Node 24.14
 ```powershell
 python scripts/verify_release_baseline.py
 python scripts/verify_security_policy.py
+python scripts/verify_chroma_boundary.py
 python scripts/verify_ci_contract.py
+python -m pip install --requirement requirements-dev.lock
+python -m ruff check .
 python -m compileall app scripts ui tests
 pytest -q
 docker compose config -q

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.evaluation_dataset import EvaluationDataset
     from app.models.job import Job
     from app.models.knowledge_base import KnowledgeBase
+    from app.models.user_identity import UserIdentity
 
 
 class UserRole(str, Enum):
@@ -56,5 +57,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     evaluation_datasets: Mapped[list["EvaluationDataset"]] = relationship(
         back_populates="owner",
+        passive_deletes=True,
+    )
+    identities: Mapped[list["UserIdentity"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
         passive_deletes=True,
     )

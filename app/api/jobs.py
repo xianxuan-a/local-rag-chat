@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentUser
@@ -14,7 +14,7 @@ from app.core.response import ApiResponse, success_response
 from app.database.sqlite import get_db
 from app.models import Job, JobType, UserRole
 from app.repositories.job_repository import JobRepository
-from app.schemas.job import JobResponse
+from app.schemas.job import JobPage, JobResponse
 from app.services.job_service import JobService
 from app.services.runtime_coordinator import (
     RuntimeCoordinator,
@@ -38,12 +38,49 @@ def _owned_job(db: Session, job_id: str, user: object) -> Job:
     return job
 
 
-@router.get("", response_model=ApiResponse[list[JobResponse]])
-def list_jobs(db: DatabaseSession, user: CurrentUser):
-    jobs = JobRepository(db).list_for_user(
-        user.id, is_admin=user.role == UserRole.ADMIN.value
+@router.get("/page", response_model=ApiResponse[JobPage])
+def list_jobs_page(
+    db: DatabaseSession,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    jobs, total = JobRepository(db).list_page_for_user(
+        user.id,
+        is_admin=user.role == UserRole.ADMIN.value,
+        limit=limit,
+        offset=offset,
     )
-    return success_response([JobResponse.model_validate(job) for job in jobs])
+    return success_response(
+        JobPage(
+            items=[JobResponse.model_validate(job) for job in jobs],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@router.get("", response_model=ApiResponse[list[JobResponse]], deprecated=True)
+def list_jobs(
+    db: DatabaseSession,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    jobs, total = JobRepository(db).list_page_for_user(
+        user.id,
+        is_admin=user.role == UserRole.ADMIN.value,
+        limit=limit,
+        offset=offset,
+    )
+    response = success_response(
+        [JobResponse.model_validate(job) for job in jobs]
+    )
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "next-release"
+    response.headers["X-Total-Count"] = str(total)
+    return response
 
 
 @router.get("/{job_id}", response_model=ApiResponse[JobResponse])

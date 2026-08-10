@@ -29,7 +29,6 @@ from app.services.hash_service import HashService
 from app.services.document_loader import DocumentLoaderService
 from app.services.document_splitter import DocumentSplitterService
 from app.services.runtime_coordinator import RuntimeCoordinator
-from app.services.vector_store_service import VectorWriteReceipt
 from app.utils.file_utils import (
     ensure_directory,
     sanitize_filename,
@@ -210,11 +209,30 @@ class FileService:
         except OSError:
             logger.exception("无法清理上传失败后残留的文件：%s", file_path)
 
-    def list_files(self, knowledge_base_id: str) -> list[FileRecord]:
+    def list_files(
+        self, knowledge_base_id: str
+    ) -> list[FileRecord]:
         """Return files belonging only to an existing knowledge base."""
         if self.knowledge_base_repository.get_by_id(knowledge_base_id) is None:
             raise ResourceNotFoundException("知识库不存在")
         return self.file_repository.list_by_knowledge_base(knowledge_base_id)
+
+    def list_files_page(
+        self,
+        knowledge_base_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[tuple[FileRecord, Job | None]], int]:
+        """Return one stable page with processing jobs loaded in one query."""
+
+        if self.knowledge_base_repository.get_by_id(knowledge_base_id) is None:
+            raise ResourceNotFoundException("知识库不存在")
+        return self.file_repository.list_page_with_processing_jobs(
+            knowledge_base_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def get_file(self, file_id: str) -> FileRecord:
         """Return one real file record or a uniform not-found error."""
