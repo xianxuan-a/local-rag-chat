@@ -1,6 +1,7 @@
 """Configuration path and directory initialization tests."""
 
 import logging
+import sys
 from itertools import combinations
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from app.core.config import (
     get_settings,
     production_secret_problem,
 )
-from scripts.init_secrets import SECRET_NAMES, initialize_secrets
+from scripts.init_secrets import SECRET_NAMES, initialize_secrets, main as init_secrets_main
 from tests.conftest import make_test_settings
 
 
@@ -308,3 +309,139 @@ def test_init_secrets_generates_distinct_policy_compliant_values(
         for name in SECRET_NAMES
     )
     assert all(value not in output for value in generated_values)
+
+
+def test_init_secrets_rotates_only_target_values_without_disclosing_them(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    env_file = tmp_path / ".env"
+    original_values = _production_secrets()
+    env_file.write_text(
+        "# preserved comment\n"
+        f"JWT_SECRET={original_values['JWT_SECRET']}\n"
+        "ALLOW_REGISTRATION=true\n"
+        f"METRICS_SCRAPE_TOKEN={original_values['METRICS_SCRAPE_TOKEN']}\n"
+        f"BACKUP_SIGNING_KEY={original_values['BACKUP_SIGNING_KEY']}\n"
+        f"BOOTSTRAP_SECRET={original_values['BOOTSTRAP_SECRET']}\n",
+        encoding="utf-8",
+    )
+
+    rotated_names = initialize_secrets(env_file, rotate_all=True)
+    output = capsys.readouterr().out
+    content = env_file.read_text(encoding="utf-8")
+    parsed = dict(
+        line.split("=", 1)
+        for line in content.splitlines()
+        if "=" in line
+    )
+    rotated_values = [parsed[name] for name in SECRET_NAMES]
+
+    assert rotated_names == SECRET_NAMES
+    assert content.startswith("# preserved comment\n")
+    assert parsed["ALLOW_REGISTRATION"] == "true"
+    assert len(set(rotated_values)) == len(SECRET_NAMES)
+    assert all(parsed[name] != original_values[name] for name in SECRET_NAMES)
+    assert all(
+        production_secret_problem(name, parsed[name]) is None
+        for name in SECRET_NAMES
+    )
+    assert all(value not in output for value in rotated_values)
+    assert all(value not in output for value in original_values.values())
+
+
+def test_init_secrets_rotation_requires_explicit_confirmation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    original = "JWT_SECRET=preserved\n"
+    env_file.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "init_secrets.py",
+            "--env-file",
+            str(env_file),
+            "--rotate-all",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        init_secrets_main()
+
+    assert exc_info.value.code == 2
+    assert env_file.read_text(encoding="utf-8") == original
+
+
+def test_init_secrets_rotation_cli_discloses_names_only(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    env_file = tmp_path / ".env"
+    original_values = _production_secrets()
+    env_file.write_text(
+        "\n".join(f"{name}={original_values[name]}" for name in SECRET_NAMES)
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "init_secrets.py",
+            "--env-file",
+            str(env_file),
+            "--rotate-all",
+            "--yes",
+        ],
+    )
+
+    assert init_secrets_main() == 0
+    captured = capsys.readouterr()
+    content = env_file.read_text(encoding="utf-8")
+    new_values = [
+        line.split("=", 1)[1]
+        for line in content.splitlines()
+        if line.split("=", 1)[0] in SECRET_NAMES
+    ]
+    combined_output = captured.out + captured.err
+    assert all(name in captured.out for name in SECRET_NAMES)
+    assert all(value not in combined_output for value in original_values.values())
+    assert all(value not in combined_output for value in new_values)
+
+
+def test_init_secrets_rotation_is_atomic_on_replace_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    original_values = _production_secrets()
+    original = "\n".join(
+        f"{name}={original_values[name]}" for name in SECRET_NAMES
+    ) + "\n"
+    env_file.write_text(original, encoding="utf-8")
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("scripts.init_secrets.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        initialize_secrets(env_file, rotate_all=True)
+
+    assert env_file.read_text(encoding="utf-8") == original
+    assert not env_file.with_name(f".{env_file.name}.init-secrets.partial").exists()
+
+
+def test_init_secrets_rejects_duplicate_secret_keys(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "JWT_SECRET=first\nJWT_SECRET=second\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="重复 Secret 键"):
+        initialize_secrets(env_file, rotate_all=True)

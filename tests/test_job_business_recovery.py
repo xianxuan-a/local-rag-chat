@@ -69,8 +69,8 @@ def test_file_recovery_distinguishes_vector_commit_windows(
             db, test_settings, app.state.rag_runtime
         ).recover_expired(completed)
         assert disposition is RecoveryDisposition.SUCCEEDED, (
-            job.error_code,
-            job.error_message,
+            completed.error_code,
+            completed.error_message,
         )
         assert completed.status == JobStatus.SUCCEEDED.value
 

@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.logger import get_logger

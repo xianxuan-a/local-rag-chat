@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import ConflictException, ResourceNotFoundException
 from app.models import (
     FileRecord,
-    FileStatus,
     Job,
     JobStatus,
     JobType,

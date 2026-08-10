@@ -1,5 +1,26 @@
 # Local RAG Chat
 
+## 安全凭据与泄露响应
+
+`.env` 只属于当前机器，已被 Git 忽略，不得提交、截图、粘贴到聊天或写入日志。Secret 也不得放入任何 `VITE_*` 变量，因为该前缀会进入浏览器产物。首次初始化只补齐空值：
+
+```powershell
+python scripts/init_secrets.py --env-file .env
+```
+
+如果 JWT、metrics、备份或 bootstrap Secret 可能泄露，使用显式确认一次性轮换四项应用 Secret；命令只输出变量名，不输出新旧值，原子更新并保留其他变量、注释和顺序：
+
+```powershell
+python scripts/init_secrets.py --env-file .env --rotate-all --yes
+docker compose up -d --force-recreate backend
+```
+
+轮换后，旧 JWT、旧 metrics token 和旧 bootstrap secret 应立即失效。`BACKUP_SIGNING_KEY` 轮换前生成的备份应视为不可信且不能再用新 Key 验签；不要删除旧备份，应立即生成新签名备份并在隔离目录完成恢复演练。外部服务 Key（例如 DashScope）必须在供应商控制台撤销并重新创建，新值只写本机 `.env` 和 GitHub 受保护的 `staging` Environment Secret。
+
+## 许可证
+
+仓库自有源码、文档和 `RAG.png` 按 [Apache License 2.0](LICENSE) 授权，归属信息见 [NOTICE](NOTICE)。第三方依赖及其资源继续适用各自许可证；分发者应同时保留相应依赖许可证和声明。
+
 Local RAG Chat 是单机、单实例的本地知识库服务，包含认证与所有权、文件索引、版本化 Chroma Collection、会话历史、同步/流式 RAG、持久化 Job、固定 Collection 评估、在线逻辑备份及安全离线恢复。
 
 ## 可复现发布基线

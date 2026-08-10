@@ -34,6 +34,9 @@ def test_ci_contract_covers_required_checks_and_security_boundaries() -> None:
 
     assert "permissions:\n  contents: read" in ci
     assert "permissions:\n  contents: read" in release
+    assert "python-quality:" in ci
+    assert "python -m ruff check ." in ci
+    assert "python scripts/verify_chroma_boundary.py" in ci
     assert "AUTH_REQUIRED=false" not in ci
     assert "secrets.DASHSCOPE_API_KEY" not in ci
     assert "frontend-build-evidence-${{ github.sha }}" in ci
@@ -41,6 +44,8 @@ def test_ci_contract_covers_required_checks_and_security_boundaries() -> None:
     assert "bundle-report-mock.json" in ci
     assert "pull_request:" not in release
     assert "environment: staging" in release
+    assert "release-security:" in release
+    assert "python scripts/verify_chroma_boundary.py" in release
     assert "include-hidden-files: true" in release
     assert ".env" not in release
     assert "data/" not in release
@@ -50,6 +55,7 @@ def test_ci_contract_covers_required_checks_and_security_boundaries() -> None:
     "broken_fragment",
     (
         "python -m pytest",
+        "python -m ruff check .",
         "npm run type-check",
         "npm run format:check",
         "npm run ci:build",
@@ -141,6 +147,8 @@ def test_release_evidence_requires_every_gate_and_commit_bound_images() -> None:
 
 
 def test_security_exception_is_narrow_current_and_time_limited() -> None:
-    assert verify_policy(today=date(2026, 8, 8)) == ["PYSEC-2026-311"]
+    assert verify_policy(today=date(2026, 8, 24)) == ["PYSEC-2026-311"]
+    with pytest.raises(ValueError, match="requires review"):
+        verify_policy(today=date(2026, 8, 25))
     with pytest.raises(ValueError, match="expired"):
         verify_policy(today=date(2026, 9, 1))

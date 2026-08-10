@@ -1,6 +1,5 @@
 """Secure file-upload integration tests."""
 
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient

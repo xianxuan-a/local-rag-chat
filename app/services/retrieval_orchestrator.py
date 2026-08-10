@@ -19,16 +19,12 @@ from app.core.observability import (
 )
 from app.core.retrieval_modes import (
     KnowledgeBaseWebPolicy,
-    ONLINE_RETRIEVAL_MODES,
     RetrievalMode,
     WebSearchStatus,
     WebTriggerReason,
 )
 from app.schemas.chat import ChatRequest, RetrievalAudit
-from app.services.evidence_sufficiency_service import (
-    EvidenceSufficiencyDecision,
-    EvidenceSufficiencyService,
-)
+from app.services.evidence_sufficiency_service import EvidenceSufficiencyService
 from app.services.retrieval_service import RetrievedChunk, RetrievalService
 from app.services.untrusted_content_service import UntrustedContentSanitizer
 from app.services.web_search_service import (

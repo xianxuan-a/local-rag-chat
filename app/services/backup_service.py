@@ -23,7 +23,6 @@ from app.models import (
     FileRecord,
     FileStatus,
     Job,
-    JobStatus,
     KnowledgeBase,
     NON_TERMINAL_JOB_STATUSES,
     RebuildStatus,
