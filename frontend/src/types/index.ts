@@ -19,6 +19,38 @@ export interface AuthSession {
   user: AuthenticatedUser
 }
 
+export interface AdminUserUpdate {
+  role?: UserRole
+  isActive?: boolean
+  reason?: string | null
+}
+
+export interface AdminUserPage {
+  items: AuthenticatedUser[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface UserAdminAuditEvent {
+  id: string
+  actorUserId: string
+  targetUserId: string
+  action: 'USER_UPDATED'
+  beforeState: { role: UserRole; isActive: boolean }
+  afterState: { role: UserRole; isActive: boolean }
+  reason: string | null
+  requestId: string
+  createdAt: string
+}
+
+export interface UserAdminAuditEventPage {
+  items: UserAdminAuditEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export type FileStatus = 'PENDING' | 'PROCESSING' | 'SUCCESS' | 'FAILED'
 
 export type KnowledgeBaseStatus = 'READY' | 'BUILDING' | 'FAILED' | 'EMPTY'
@@ -151,6 +183,13 @@ export interface FileRecord {
   vectorMetric: string
   collectionName: string | null
   processingDuration: number | null
+}
+
+export interface FileRecordPage {
+  items: FileRecord[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface FileUploadInput {

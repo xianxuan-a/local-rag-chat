@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -29,15 +29,47 @@ class JobRepository:
     def get(self, job_id: str) -> Job | None:
         return self.db.get(Job, str(job_id))
 
-    def list_for_user(self, user_id: str, *, is_admin: bool) -> list[Job]:
+    def list_for_user(
+        self,
+        user_id: str,
+        *,
+        is_admin: bool,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Job]:
         statement = select(Job)
         if not is_admin:
             statement = statement.where(Job.created_by_id == user_id)
         return list(
             self.db.scalars(
                 statement.order_by(Job.created_at.desc(), Job.id.desc())
+                .limit(limit)
+                .offset(offset)
             ).all()
         )
+
+    def list_page_for_user(
+        self,
+        user_id: str,
+        *,
+        is_admin: bool,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[Job], int]:
+        condition = None if is_admin else Job.created_by_id == user_id
+        statement = select(Job)
+        total_statement = select(func.count(Job.id))
+        if condition is not None:
+            statement = statement.where(condition)
+            total_statement = total_statement.where(condition)
+        items = list(
+            self.db.scalars(
+                statement.order_by(Job.created_at.desc(), Job.id.desc())
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+        return items, int(self.db.scalar(total_statement) or 0)
 
     def latest_for_resource(
         self,

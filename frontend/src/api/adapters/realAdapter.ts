@@ -1,4 +1,5 @@
 import { getRuntimeAccessToken } from '@/api/auth'
+import { mapAuthenticatedUser } from '@/api/authApi'
 import type { ApiConfig } from '@/api/config'
 import type { AppApi } from '@/api/contracts'
 import { HttpClient } from '@/api/http'
@@ -26,8 +27,13 @@ import {
   AppError,
   type ChatStreamResult,
   type ChatStreamStart,
+  type FileRecordPage,
   type RetrievalAudit,
   type SourceReference,
+  type AdminUserPage,
+  type UserAdminAuditEvent,
+  type UserAdminAuditEventPage,
+  type UserRole,
 } from '@/types'
 
 export interface RealAdapterDependencies {
@@ -68,6 +74,88 @@ function eventString(value: Record<string, unknown>, field: string): string {
     })
   }
   return candidate
+}
+
+function pageNumber(value: Record<string, unknown>, field: string): number {
+  const candidate = value[field]
+  if (typeof candidate !== 'number' || !Number.isInteger(candidate) || candidate < 0) {
+    throw new AppError(
+      'API_CONTRACT_INVALID',
+      '后端响应与前端契约不一致。',
+      `分页字段 ${field} 无效。`,
+      { kind: 'parse' },
+    )
+  }
+  return candidate
+}
+
+function mapAdminUserPage(value: unknown): AdminUserPage {
+  const page = eventRecord(value)
+  return {
+    items: mapList(page.items, mapAuthenticatedUser, '用户'),
+    total: pageNumber(page, 'total'),
+    limit: pageNumber(page, 'limit'),
+    offset: pageNumber(page, 'offset'),
+  }
+}
+
+function mapFilePage(value: unknown): FileRecordPage {
+  const page = eventRecord(value)
+  return {
+    items: mapList(page.items, mapFileDto, '文件'),
+    total: pageNumber(page, 'total'),
+    limit: pageNumber(page, 'limit'),
+    offset: pageNumber(page, 'offset'),
+  }
+}
+
+function mapAuditState(value: unknown): { role: UserRole; isActive: boolean } {
+  const state = eventRecord(value)
+  const role = eventString(state, 'role')
+  if (!['ADMIN', 'USER'].includes(role) || typeof state.is_active !== 'boolean') {
+    throw new AppError(
+      'API_CONTRACT_INVALID',
+      '后端响应与前端契约不一致。',
+      '用户审计状态无效。',
+      { kind: 'parse' },
+    )
+  }
+  return { role: role as UserRole, isActive: state.is_active }
+}
+
+function mapUserAuditEvent(value: unknown): UserAdminAuditEvent {
+  const event = eventRecord(value)
+  const action = eventString(event, 'action')
+  const reason = event.reason
+  if (action !== 'USER_UPDATED' || !(reason === null || typeof reason === 'string')) {
+    throw new AppError(
+      'API_CONTRACT_INVALID',
+      '后端响应与前端契约不一致。',
+      '用户审计事件无效。',
+      { kind: 'parse' },
+    )
+  }
+  return {
+    id: eventString(event, 'id'),
+    actorUserId: eventString(event, 'actor_user_id'),
+    targetUserId: eventString(event, 'target_user_id'),
+    action,
+    beforeState: mapAuditState(event.before_state),
+    afterState: mapAuditState(event.after_state),
+    reason,
+    requestId: eventString(event, 'request_id'),
+    createdAt: eventString(event, 'created_at'),
+  }
+}
+
+function mapUserAuditPage(value: unknown): UserAdminAuditEventPage {
+  const page = eventRecord(value)
+  return {
+    items: mapList(page.items, mapUserAuditEvent, '用户审计事件'),
+    total: pageNumber(page, 'total'),
+    limit: pageNumber(page, 'limit'),
+    offset: pageNumber(page, 'offset'),
+  }
 }
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -259,6 +347,47 @@ export function createRealAdapter(
   }
 
   const adapter: AppApi = {
+    async listUsers(options = {}) {
+      const response = await http.request<unknown>('/api/users', {
+        query: {
+          query: options.query?.trim() || undefined,
+          role: options.role,
+          is_active: options.isActive,
+          limit: options.limit ?? 50,
+          offset: options.offset ?? 0,
+        },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      return mapAdminUserPage(unwrapApiEnvelope(response.data))
+    },
+
+    async updateUser(id, input) {
+      const response = await http.request<unknown>(
+        `/api/users/${encodeURIComponent(id)}`,
+        {
+          method: 'PATCH',
+          json: {
+            ...(input.role === undefined ? {} : { role: input.role }),
+            ...(input.isActive === undefined ? {} : { is_active: input.isActive }),
+            reason: input.reason?.trim() || null,
+          },
+        },
+      )
+      return mapAuthenticatedUser(unwrapApiEnvelope(response.data))
+    },
+
+    async listUserAuditEvents(options = {}) {
+      const response = await http.request<unknown>('/api/users/audit-events', {
+        query: {
+          target_user_id: options.targetUserId,
+          limit: options.limit ?? 50,
+          offset: options.offset ?? 0,
+        },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      return mapUserAuditPage(unwrapApiEnvelope(response.data))
+    },
+
     async getSettings(options) {
       return mapSettingsDto(await getEnvelope('/api/settings', options?.signal))
     },
@@ -346,6 +475,18 @@ export function createRealAdapter(
         ...(options?.signal === undefined ? {} : { signal: options.signal }),
       })
       return mapList(unwrapApiEnvelope(response.data), mapFileDto, '文件')
+    },
+
+    async listFilesPage(knowledgeBaseId, options = {}) {
+      const response = await http.request<unknown>('/api/files/page', {
+        query: {
+          knowledge_base_id: knowledgeBaseId,
+          limit: options.limit ?? 50,
+          offset: options.offset ?? 0,
+        },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      return mapFilePage(unwrapApiEnvelope(response.data))
     },
 
     async getFile(id) {

@@ -399,6 +399,126 @@ def test_running_backup_terminal_cleanup_clears_draining(
         engine.dispose()
 
 
+def test_password_policy_accepts_eight_characters_and_rejects_seven(client) -> None:
+    accepted_passwords = ("12345678", "密码安全测试通过")
+    for index, password in enumerate(accepted_passwords):
+        username = f"eight-character-user-{index}"
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": password,
+            },
+        )
+        assert registered.status_code == 201, registered.text
+        logged_in = client.post(
+            "/api/auth/login",
+            json={"identity": username, "password": password},
+        )
+        assert logged_in.status_code == 200, logged_in.text
+
+    too_short = client.post(
+        "/api/auth/register",
+        json={
+            "username": "seven-character-user",
+            "email": "seven-character-user@example.com",
+            "password": "1234567",
+        },
+    )
+    assert too_short.status_code == 400
+    assert "密码必须至少包含 8 个字符" in too_short.text
+
+
+def test_password_whitespace_is_preserved_between_register_and_login(client) -> None:
+    password = " pass1234 "
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "username": "space-password-user",
+            "email": " space-password@example.com ",
+            "password": password,
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["data"]["email"] == "space-password@example.com"
+
+    exact = client.post(
+        "/api/auth/login",
+        json={"identity": " space-password-user ", "password": password},
+    )
+    assert exact.status_code == 200, exact.text
+    trimmed = client.post(
+        "/api/auth/login",
+        json={"identity": "space-password-user", "password": "pass1234"},
+    )
+    assert trimmed.status_code == 401
+
+
+def test_username_and_email_share_one_global_login_namespace(client) -> None:
+    first = client.post(
+        "/api/auth/register",
+        json={
+            "username": "shared@example.com",
+            "email": "first@example.com",
+            "password": "password-one",
+        },
+    )
+    assert first.status_code == 201, first.text
+
+    email_collision = client.post(
+        "/api/auth/register",
+        json={
+            "username": "second-user",
+            "email": "SHARED@example.com",
+            "password": "password-two",
+        },
+    )
+    assert email_collision.status_code == 409
+
+    username_collision = client.post(
+        "/api/auth/register",
+        json={
+            "username": "FIRST@example.com",
+            "email": "third@example.com",
+            "password": "password-three",
+        },
+    )
+    assert username_collision.status_code == 409
+
+    same_identity = client.post(
+        "/api/auth/register",
+        json={
+            "username": "same@example.com",
+            "email": "same@example.com",
+            "password": "password-four",
+        },
+    )
+    assert same_identity.status_code == 201, same_identity.text
+    login = client.post(
+        "/api/auth/login",
+        json={"identity": "SAME@example.com", "password": "password-four"},
+    )
+    assert login.status_code == 200, login.text
+
+
+def test_concurrent_registration_cannot_claim_one_identity_twice(client) -> None:
+    def register(index: int) -> int:
+        response = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"concurrent-user-{index}",
+                "email": "one-concurrent-identity@example.com",
+                "password": "password-eight",
+            },
+        )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(executor.map(register, (1, 2)))
+    assert statuses == [201, 409]
+
+
 def test_identity_normalization_password_boundary_and_live_user_reload(
     client,
     app,

@@ -62,6 +62,7 @@ test('root redirect, nine business routes and 404 are reachable', async ({ page 
     ['/indexes', '索引管理'],
     ['/evaluation', 'RAG 评测'],
     ['/settings', '系统设置'],
+    ['/users', '用户管理'],
   ] as const
 
   for (const [path, title] of routes) {
@@ -229,6 +230,10 @@ test('sessions and chat cover create, search, stream, stop, sources and feedback
   await expect(page.getByText(/没有检索到达到阈值/u).last()).toBeVisible({
     timeout: 10_000,
   })
+  await expect(page.locator('.chat-page')).toHaveAttribute(
+    'data-generation-state',
+    'idle',
+  )
   await expect(page.locator('.chat-side-right .source-card')).toHaveCount(0)
 
   await composer.fill('触发失败')
@@ -313,6 +318,19 @@ test('retrieval, indexes, evaluation and settings complete their core flows', as
   await expect(page.getByText('Mock Mode')).toHaveCount(0)
 })
 
+test('administrator user management updates roles and writes audit history', async ({
+  page,
+}) => {
+  await page.goto('/users')
+  await expect(page.getByRole('heading', { name: '用户管理', level: 1 })).toBeVisible()
+  const row = page.locator('tr').filter({ hasText: 'knowledge-user' })
+  await row.getByLabel('修改 knowledge-user 的角色').selectOption('ADMIN')
+  await row.getByLabel('knowledge-user 的变更原因').fill('Playwright 权限回归')
+  await row.getByRole('button', { name: '保存角色' }).click()
+  await expect(row.getByLabel('修改 knowledge-user 的角色')).toHaveValue('ADMIN')
+  await expect(page.getByText('Playwright 权限回归')).toBeVisible()
+})
+
 test('all business pages have no root overflow at 1024px', async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 768 })
   for (const path of [
@@ -325,6 +343,7 @@ test('all business pages have no root overflow at 1024px', async ({ page }) => {
     '/indexes',
     '/evaluation',
     '/settings',
+    '/users',
   ]) {
     await page.goto(path)
     await expect(page.locator('main')).toBeVisible()

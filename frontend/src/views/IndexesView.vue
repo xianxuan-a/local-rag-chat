@@ -22,12 +22,14 @@ import IndexStatusBadge from '@/components/indexes/IndexStatusBadge.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppTooltip from '@/components/ui/AppTooltip.vue'
 import { useKnowledgeBaseStore } from '@/stores/knowledgeBase'
+import { useAuthStore } from '@/stores/auth'
 import type { DurableJob, IndexCollection, IndexLifecycle, IndexState } from '@/types'
 import { isAbortError } from '@/utils/abort'
 import { getErrorDetail, getErrorMessage } from '@/utils/error'
 import { formatDateTime, formatNumber } from '@/utils/format'
 
 const knowledgeBaseStore = useKnowledgeBaseStore()
+const authStore = useAuthStore()
 const states = ref<IndexState[]>([])
 const loading = ref(true)
 const error = ref<unknown>(null)
@@ -236,6 +238,7 @@ onBeforeUnmount(stopPolling)
           </select>
         </label>
         <AppButton
+          v-if="authStore.isAdmin"
           variant="primary"
           :disabled="currentState === null || jobIsRunning"
           @click="rebuildCurrent"
@@ -286,7 +289,11 @@ onBeforeUnmount(stopPolling)
             </div>
             <div class="table-actions">
               <StatusBadge :status="activeJob.status" />
-              <AppButton v-if="jobIsRunning" size="sm" @click="requestCancel">
+              <AppButton
+                v-if="authStore.isAdmin && jobIsRunning"
+                size="sm"
+                @click="requestCancel"
+              >
                 <Square :size="12" />
                 请求取消
               </AppButton>
@@ -377,7 +384,10 @@ onBeforeUnmount(stopPolling)
                           <Eye :size="13" />
                         </AppButton>
                       </AppTooltip>
-                      <AppTooltip v-if="item.lifecycle === 'previous'" text="回滚">
+                      <AppTooltip
+                        v-if="authStore.isAdmin && item.lifecycle === 'previous'"
+                        text="回滚"
+                      >
                         <AppButton
                           size="icon"
                           variant="ghost"
@@ -389,7 +399,7 @@ onBeforeUnmount(stopPolling)
                         </AppButton>
                       </AppTooltip>
                       <AppTooltip
-                        v-if="item.lifecycle === 'building'"
+                        v-if="authStore.isAdmin && item.lifecycle === 'building'"
                         text="清理遗留候选"
                       >
                         <AppButton
@@ -404,7 +414,8 @@ onBeforeUnmount(stopPolling)
                       </AppTooltip>
                       <AppTooltip
                         v-if="
-                          item.lifecycle === 'previous' || item.lifecycle === 'orphan'
+                          authStore.isAdmin &&
+                          (item.lifecycle === 'previous' || item.lifecycle === 'orphan')
                         "
                         :text="item.cleanupReason ?? '安全清理'"
                       >

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -23,6 +24,8 @@ SECRET_NAMES = (
 def _compose_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("PIP_INDEX_URL", None)
+    environment["API_TIMEOUT_SECONDS"] = "7"
+    environment["API_STREAM_TIMEOUT_SECONDS"] = "123"
     for index, name in enumerate(SECRET_NAMES):
         environment[name] = f"compose-test-{index}-" + ("x" * 40)
     return environment
@@ -92,6 +95,8 @@ def test_compose_uses_vue_real_frontend_and_profiles_legacy_streamlit() -> None:
     assert frontend["build"]["args"]["VITE_API_BASE_URL"] == "/"
     assert frontend["ports"][0]["target"] == 8080
     assert frontend["depends_on"]["backend"]["condition"] == "service_healthy"
+    assert frontend["environment"]["NGINX_CLIENT_MAX_BODY_SIZE"] == "21m"
+    assert frontend["environment"]["NGINX_API_READ_TIMEOUT"] == "75s"
     assert legacy["profiles"] == ["legacy"]
     assert legacy["ports"][0]["published"] == "8502"
     assert "streamlit" in legacy["command"]
@@ -105,7 +110,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     dockerfile = (PROJECT_ROOT / "frontend" / "Dockerfile").read_text(
         encoding="utf-8"
     )
-    nginx = (PROJECT_ROOT / "frontend" / "nginx.conf").read_text(
+    nginx = (PROJECT_ROOT / "frontend" / "nginx.conf.template").read_text(
         encoding="utf-8"
     )
 
@@ -123,6 +128,7 @@ def test_frontend_image_and_nginx_contract() -> None:
     assert "npm run build" in dockerfile
     assert "npm run audit:real" in dockerfile
     assert "nginxinc/nginx-unprivileged" in dockerfile
+    assert "nginx.conf.template" in dockerfile
     assert "COPY --from=build /app/dist-real/" in dockerfile
     assert "proxy_pass http://fastapi_backend" in nginx
     assert 'proxy_set_header Forwarded ""' in nginx
@@ -133,6 +139,70 @@ def test_frontend_image_and_nginx_contract() -> None:
     assert "try_files $uri $uri/ /index.html" in nginx
     assert "immutable" in nginx
     assert "X-Content-Type-Options \"nosniff\"" in nginx
+    assert "client_max_body_size ${NGINX_CLIENT_MAX_BODY_SIZE}" in nginx
+    assert "proxy_read_timeout ${NGINX_API_READ_TIMEOUT}" in nginx
+    assert '"code":413' in nginx
+
+
+def test_compose_forwards_every_documented_runtime_setting() -> None:
+    result = _run_compose(
+        "--profile",
+        "legacy",
+        "config",
+        "--format",
+        "json",
+        environment=_compose_environment(),
+    )
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    backend_environment = services["backend"]["environment"]
+    example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    documented = {
+        match.group(1)
+        for line in example.splitlines()
+        if (match := re.match(r"^([A-Z][A-Z0-9_]*)=", line))
+    }
+    compose_only = {
+        "BACKEND_PORT",
+        "FRONTEND_PORT",
+        "LEGACY_UI_PORT",
+        "IMAGE_TAG",
+        "VITE_API_TIMEOUT_MS",
+        "NGINX_CLIENT_MAX_BODY_SIZE",
+        "NGINX_API_READ_TIMEOUT",
+    }
+    legacy_only = {
+        "API_BASE_URL",
+        "API_TIMEOUT_SECONDS",
+        "API_STREAM_TIMEOUT_SECONDS",
+    }
+    fixed_container_settings = {
+        "ENVIRONMENT",
+        "AUTH_REQUIRED",
+        "HOST",
+        "PORT",
+        "LOG_DIR",
+        "DATA_DIR",
+        "UPLOAD_DIR",
+        "CHROMA_DIR",
+        "METADATA_DIR",
+        "CHAT_HISTORY_DIR",
+        "BACKUP_DIR",
+        "EVALUATION_DIR",
+        "WEB_QUERY_LOG_MODE",
+        "WEB_CONTENT_CACHE_ENABLED",
+        "AUTH_RATE_LIMIT_ENABLED",
+        "TRUSTED_PROXY_CIDRS",
+        "TRUSTED_PROXY_HOSTS",
+    }
+    expected_backend = documented - compose_only - legacy_only
+    assert expected_backend <= set(backend_environment)
+    assert fixed_container_settings <= set(backend_environment)
+    assert services["legacy-ui"]["environment"] == {
+        "API_BASE_URL": "http://backend:8000",
+        "API_STREAM_TIMEOUT_SECONDS": "123",
+        "API_TIMEOUT_SECONDS": "7",
+    }
 
 
 def test_frontend_build_defaults_to_real_and_mock_is_explicit() -> None:

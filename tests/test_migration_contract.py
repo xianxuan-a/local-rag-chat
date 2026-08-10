@@ -87,6 +87,18 @@ def test_test_database_downgrade_upgrade_round_trip(tmp_path: Path) -> None:
     command.downgrade(alembic_config(database_url), "-1")
     engine = create_engine(database_url)
     try:
+        assert current_revision(engine) == "0008_user_identities"
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(database_url), "-1")
+    engine = create_engine(database_url)
+    try:
+        assert current_revision(engine) == "0007_retrieval_modes"
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(database_url), "-1")
+    engine = create_engine(database_url)
+    try:
         assert current_revision(engine) == "0006_dashboard_aggregates"
     finally:
         engine.dispose()
@@ -115,6 +127,54 @@ def test_test_database_downgrade_upgrade_round_trip(tmp_path: Path) -> None:
     finally:
         engine.dispose()
     upgrade_database(database_url)
+
+
+def test_0008_refuses_cross_account_identity_conflicts(tmp_path: Path) -> None:
+    database = tmp_path / "identity-conflict.db"
+    database_url = _url(database)
+    upgrade_database(database_url, "0007_retrieval_modes")
+    with closing(sqlite3.connect(database)) as connection:
+        users = [
+            (
+                "11111111-1111-1111-1111-111111111111",
+                "shared@example.com",
+                "shared@example.com",
+                "first@example.com",
+                "first@example.com",
+            ),
+            (
+                "22222222-2222-2222-2222-222222222222",
+                "second-user",
+                "second-user",
+                "shared@example.com",
+                "shared@example.com",
+            ),
+        ]
+        connection.executemany(
+            """
+            INSERT INTO users(
+                id, username, username_normalized, email, email_normalized,
+                password_hash, role, is_active, must_change_password,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, '!', 'USER', 1, 0, ?, ?)
+            """,
+            [
+                (*user, "2026-01-01 00:00:00", "2026-01-01 00:00:00")
+                for user in users
+            ],
+        )
+        connection.commit()
+
+    with pytest.raises(RuntimeError, match="跨账户登录标识冲突") as caught:
+        command.upgrade(alembic_config(database_url), "head")
+    assert "shared@example.com" not in str(caught.value)
+
+    engine = create_engine(database_url)
+    try:
+        assert current_revision(engine) == "0007_retrieval_modes"
+        assert "user_identities" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
 
 
 def test_0007_downgrade_refuses_web_source_history(tmp_path: Path) -> None:
@@ -193,7 +253,10 @@ def test_0007_downgrade_refuses_web_source_history(tmp_path: Path) -> None:
         engine.dispose()
 
     with pytest.raises(RuntimeError, match="web source history"):
-        command.downgrade(alembic_config(database_url), "-1")
+        command.downgrade(
+            alembic_config(database_url),
+            "0006_dashboard_aggregates",
+        )
 
     engine = create_engine(database_url)
     try:

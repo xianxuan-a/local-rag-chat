@@ -4,6 +4,10 @@ import type { AppApi } from '@/api/contracts'
 
 export function createLazyApiClient(adapterPromise: Promise<AppApi>): AppApi {
   return {
+    listUsers: async (options) => (await adapterPromise).listUsers(options),
+    updateUser: async (id, input) => (await adapterPromise).updateUser(id, input),
+    listUserAuditEvents: async (options) =>
+      (await adapterPromise).listUserAuditEvents(options),
     getSettings: async (options) => (await adapterPromise).getSettings(options),
     updateSettings: async (input) => (await adapterPromise).updateSettings(input),
     getDashboard: async (options) => (await adapterPromise).getDashboard(options),
@@ -18,6 +22,8 @@ export function createLazyApiClient(adapterPromise: Promise<AppApi>): AppApi {
     deleteKnowledgeBase: async (id) => (await adapterPromise).deleteKnowledgeBase(id),
     listFiles: async (knowledgeBaseId, options) =>
       (await adapterPromise).listFiles(knowledgeBaseId, options),
+    listFilesPage: async (knowledgeBaseId, options) =>
+      (await adapterPromise).listFilesPage(knowledgeBaseId, options),
     getFile: async (id) => (await adapterPromise).getFile(id),
     addFile: async (knowledgeBaseId, input) =>
       (await adapterPromise).addFile(knowledgeBaseId, input),

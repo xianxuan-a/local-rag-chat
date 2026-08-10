@@ -395,8 +395,8 @@ def normalize_identity(value: str) -> str:
 
 def validate_password_bytes(password: str) -> bytes:
     encoded = password.encode("utf-8")
-    if len(encoded) < 12:
-        raise ValidationException("密码必须至少包含 12 个 UTF-8 字节")
+    if len(password) < 8:
+        raise ValidationException("密码必须至少包含 8 个字符")
     if len(encoded) > 72:
         raise ValidationException("密码不能超过 bcrypt 的 72 个 UTF-8 字节限制")
     return encoded

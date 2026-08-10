@@ -111,7 +111,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop_local.ps1
 API 停止时可离线初始化 bootstrap admin，密码从环境变量读取或安全交互输入，不出现在命令行参数中：
 
 ```powershell
-$env:BOOTSTRAP_ADMIN_PASSWORD="<12–72 UTF-8 bytes>"
+$env:BOOTSTRAP_ADMIN_PASSWORD="<至少 8 个字符，最多 72 个 UTF-8 字节>"
 python scripts/bootstrap_admin.py --username admin --email admin@example.com
 Remove-Item Env:BOOTSTRAP_ADMIN_PASSWORD
 ```
@@ -204,8 +204,8 @@ downgrade。应用不会迁移真实数据库；升级仍需用户在停机窗�
 - 监听 `0.0.0.0`、`::`，或通过容器/反向代理提供访问时必须启用认证。CORS 和 `X-Forwarded-For` 都不是访问控制，不能让不安全的免认证监听变得安全；不要把 loopback 免认证端口再通过本地代理暴露出去。
 - 生产环境强制要求 `AUTH_REQUIRED=true`；关闭认证会在配置校验阶段直接拒绝启动。
 - 仓库支持的后端入口是 `python run.py`，监听地址统一来自 `HOST`。当前启动体系不提供 Unix socket；直接使用 Uvicorn CLI 覆盖 `--host` 会绕过统一配置，不属于受支持部署方式。
-- 用户名和邮箱保留展示值，同时以 `NFKC + casefold` 保存规范化值并唯一约束；登录使用相同规则。
-- 密码必须是 12–72 个 UTF-8 字节，超出 bcrypt 72 字节上限会在哈希前拒绝。
+- 用户名和邮箱保留展示值，`user_identities` 使用 `NFKC + casefold` 后的值作为全局唯一身份；用户名与其他账号邮箱之间也不能冲突，登录只通过该表定位唯一用户。迁移遇到跨账号冲突会输出脱敏摘要并安全失败，不自动改名或合并。
+- 密码必须至少包含 8 个 Unicode 字符；由于使用 bcrypt，UTF-8 编码后不能超过 72 字节。首尾空格属于密码本身，不会被客户端或服务端裁剪；客户端会先做同样校验，服务端仍是最终安全边界。
 - JWT 只以 `sub` 定位用户。每个请求都从数据库重新读取 `is_active` 和 `role`，不信任 token 中的旧权限。
 - `jti` 只用于追踪，本版本没有撤销表。退出登录只是客户端删除 token；已经签发的 token 不会被服务端撤销。
 - 用户注册由 `ALLOW_REGISTRATION` 显式控制；Compose 生产默认关闭。
@@ -255,6 +255,16 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 | POST | `/api/auth/bootstrap` | 使用 bootstrap Secret 初始化一次管理员 |
 | GET | `/metrics` | 使用独立 scrape token 抓取 Prometheus 指标 |
 
+管理员用户管理与审计接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/users?limit=50&offset=0&query=&role=&is_active=` | 分页查询用户 |
+| PATCH | `/api/users/{id}` | 修改角色/启停状态并记录可选原因 |
+| GET | `/api/users/audit-events` | 分页读取不可修改的管理审计事件 |
+
+普通用户调用管理接口返回 403；管理员不能降级或停用自己。服务层与 SQLite 触发器同时保护最后一个有效管理员，每次真实变更都记录操作者、目标、前后状态、原因、request ID 与时间。Vue `/users` 路由和导航只对 ADMIN 展示，但后端始终独立执行权限校验。
+
 ## 日志、健康检查与监控
 
 - 控制台和 UTF-8 文件日志共用一套配置；`app.log` 按 `LOG_MAX_BYTES` 轮转并最多保留 `LOG_BACKUP_COUNT` 份。
@@ -282,7 +292,8 @@ Job 接口：
 
 | 方法 | 路径 |
 | --- | --- |
-| GET | `/api/jobs` |
+| GET | `/api/jobs/page?limit=50&offset=0` |
+| GET | `/api/jobs`（弃用，下一版本删除） |
 | GET | `/api/jobs/{id}` |
 | POST | `/api/jobs/{id}/cancel` |
 | POST | `/api/jobs/{id}/retry` |
@@ -305,7 +316,8 @@ Job 接口：
 | POST/GET | `/api/knowledge-bases` | 创建/列出当前所有者知识库 |
 | GET/PATCH/DELETE | `/api/knowledge-bases/{id}` | 查询、更新名称/描述或安全删除 |
 | POST | `/api/files/upload` | 上传并返回 `PENDING` |
-| GET | `/api/files?knowledge_base_id=...` | 查询文件 |
+| GET | `/api/files/page?knowledge_base_id=...&limit=50&offset=0` | 分页查询文件与总数 |
+| GET | `/api/files?knowledge_base_id=...` | 弃用的数组响应，下一版本删除 |
 | POST | `/api/files/{id}/process` | 返回 `202 FILE_PROCESS` Job |
 | DELETE | `/api/files/{id}` | 安全删除文件与引用向量 |
 | GET/PUT | `/api/settings` | 读取有效配置；管理员持久化安全业务配置 |
@@ -332,7 +344,7 @@ Collection 创建/读取始终使用 `embedding_function=None`，写入使用预
 
 在线模式依次受全局开关、用户角色和知识库 `web_access_policy` 约束；知识库的 `allow` 不能绕过上层禁令。网页引用使用 `[Wx]`。当前仓库默认安装显式的 `disabled` Provider，因此未接入指定供应商前会返回 `not_configured`，不会伪造搜索结果或回退 Mock。
 
-联网查询只使用当前问题，经 NFKC 规范化、隐私脱敏和长度校验后交给 Provider；日志仅记录脱敏查询的 SHA-256 摘要。抓取器逐跳校验重定向与域名，拒绝私网/环回地址、非文本内容和超限响应。知识库与网页正文都按不可信数据处理，高风险提示注入段不会进入生成上下文。
+联网查询只使用当前问题，经 NFKC 规范化、隐私脱敏和长度校验后交给 Provider；日志仅记录脱敏查询的 SHA-256 摘要。抓取器逐跳只解析一次 DNS，拒绝含任意非公网结果的域名，再把 TCP 连接固定到已验证 IP；HTTPS 仍使用原域名执行 Host、SNI 和证书校验。带凭据 URL、公网到私网重定向、非文本/压缩内容和超限响应都会被拒绝。知识库与网页正文都按不可信数据处理，高风险提示注入段不会进入生成上下文。
 
 ## 固定 Collection 评估
 
@@ -428,7 +440,7 @@ Invoke-WebRequest http://localhost:8000/health/ready
 
 可用 `docker history local-rag-chat:0.1.0` 和 `docker history local-rag-chat-frontend:0.1.0` 检查层输入，再用临时容器检查 `/app` 与 `/usr/share/nginx/html`；运行镜像中不应出现 `.env`、`.git`、数据库、上传、测试产物或前端 `node_modules`。
 
-`/health/live` 只表示 FastAPI 进程存活；`/health/ready` 还会校验 SQLite、Alembic head、全部持久目录、Chroma 和 Job worker。前端 `/healthz` 只检查 Nginx/静态服务，启动顺序仍要求 backend healthy。主机端口可用 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT` 调整，容器内端口保持 8000/8080。
+`/health/live` 只表示 FastAPI 进程存活；`/health/ready` 还会校验 SQLite、Alembic head、全部持久目录、Chroma 和 Job worker。前端 `/healthz` 只检查 Nginx/静态服务，启动顺序仍要求 backend healthy。主机端口可用 `.env` 中的 `BACKEND_PORT`、`FRONTEND_PORT` 调整，容器内端口保持 8000/8080。Nginx 模板默认允许 `21m` multipart 请求、普通 API 读取超时 `75s`，后端仍精确执行默认 20 MiB 文件限制；代理和后端的超限响应都保持 JSON 413。
 
 Vue History 路由（例如 `/dashboard`、`/chat`、`/knowledge-bases`、`/settings`）都回退到 `index.html`，且使用 `no-cache`；带 hash 的 `/assets/` 使用一年 `immutable` 缓存和静态 gzip。`/api` 永不进入 SPA fallback，FastAPI 的 Bearer、`X-Request-ID`、JSON envelope 和 HTTP 状态码会原样穿过；Chat NDJSON 流与 retry 流关闭代理 buffering 和 gzip。
 

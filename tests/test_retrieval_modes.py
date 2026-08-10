@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import socket
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -10,7 +11,6 @@ import pytest
 
 from app.core.exceptions import ModelServiceException
 from app.core.retrieval_modes import (
-    KnowledgeBaseWebPolicy,
     RetrievalMode,
     WebSearchStatus,
     WebTriggerReason,
@@ -29,6 +29,8 @@ from app.services.untrusted_content_service import UntrustedContentSanitizer
 from app.services.web_search_service import (
     DomainPolicy,
     FetchedWebPage,
+    PinnedWebRequest,
+    PinnedWebResponse,
     SearchQuerySanitizer,
     WebPageEvidence,
     WebSearchHit,
@@ -263,6 +265,114 @@ def test_fetcher_rejects_loopback_before_http_request(tmp_path) -> None:
     fetcher = WebPageFetcher(make_test_settings(tmp_path))
     with pytest.raises(ValueError, match="non_public_address"):
         fetcher._validate_public_host("127.0.0.1")
+
+
+class _RecordingPinnedTransport:
+    def __init__(self, responses: list[PinnedWebResponse]) -> None:
+        self.responses = responses
+        self.requests: list[PinnedWebRequest] = []
+
+    def send(self, request: PinnedWebRequest) -> PinnedWebResponse:
+        self.requests.append(request)
+        return self.responses.pop(0)
+
+
+def _dns_record(address: str) -> tuple:
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    socket_address = (address, 443, 0, 0) if family == socket.AF_INET6 else (address, 443)
+    return (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", socket_address)
+
+
+def test_fetcher_pins_the_single_validated_dns_result(tmp_path) -> None:
+    resolutions = iter(
+        [
+            [_dns_record("93.184.216.34")],
+            [_dns_record("127.0.0.1")],
+        ]
+    )
+    resolution_count = 0
+
+    def rebinding_resolver(*_args, **_kwargs):
+        nonlocal resolution_count
+        resolution_count += 1
+        return next(resolutions)
+
+    transport = _RecordingPinnedTransport(
+        [
+            PinnedWebResponse(
+                status_code=200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                body=b"<title>Safe</title><p>Public content</p>",
+            )
+        ]
+    )
+    page = WebPageFetcher(
+        make_test_settings(tmp_path),
+        resolver=rebinding_resolver,
+        transport=transport,
+    ).fetch("https://example.com/article")
+
+    assert page.title == "Safe"
+    assert resolution_count == 1
+    assert transport.requests[0].connect_ip == "93.184.216.34"
+    assert transport.requests[0].hostname == "example.com"
+    assert transport.requests[0].host_header == "example.com"
+    assert transport.requests[0].scheme == "https"
+
+
+def test_fetcher_rejects_mixed_public_private_dns_answers(tmp_path) -> None:
+    transport = _RecordingPinnedTransport([])
+    fetcher = WebPageFetcher(
+        make_test_settings(tmp_path),
+        resolver=lambda *_args, **_kwargs: [
+            _dns_record("93.184.216.34"),
+            _dns_record("10.0.0.8"),
+        ],
+        transport=transport,
+    )
+
+    with pytest.raises(ValueError, match="non_public_address"):
+        fetcher.fetch("https://example.com/")
+    assert transport.requests == []
+
+
+def test_fetcher_revalidates_redirect_and_rejects_private_target(tmp_path) -> None:
+    def redirect_resolver(host: str, *_args, **_kwargs):
+        if host == "example.com":
+            return [_dns_record("93.184.216.34")]
+        return [_dns_record("192.168.1.10")]
+
+    transport = _RecordingPinnedTransport(
+        [
+            PinnedWebResponse(
+                status_code=302,
+                headers={"location": "http://internal.example/secret"},
+                body=b"",
+            )
+        ]
+    )
+    fetcher = WebPageFetcher(
+        make_test_settings(tmp_path),
+        resolver=redirect_resolver,
+        transport=transport,
+    )
+
+    with pytest.raises(ValueError, match="non_public_address"):
+        fetcher.fetch("https://example.com/start")
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("address", ["::1", "fc00::1", "fe80::1"])
+def test_fetcher_rejects_local_ipv6_addresses(tmp_path, address: str) -> None:
+    fetcher = WebPageFetcher(make_test_settings(tmp_path))
+    with pytest.raises(ValueError, match="non_public_address"):
+        fetcher._validate_public_host(address)
+
+
+def test_fetcher_rejects_url_credentials(tmp_path) -> None:
+    fetcher = WebPageFetcher(make_test_settings(tmp_path))
+    with pytest.raises(ValueError, match="URL"):
+        fetcher.fetch("https://user:password@example.com/")
 
 
 def test_unconfigured_provider_is_explicit_and_never_searches(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,7 +14,7 @@ from app.core.security import (
     normalize_identity,
     verify_password,
 )
-from app.models import User, UserRole
+from app.models import User, UserIdentity, UserRole
 from app.schemas.auth import BootstrapAdminRequest, LoginRequest, RegisterRequest
 
 
@@ -42,9 +42,9 @@ class AuthService:
             username_normalized, email_normalized
         )
         user = User(
-            username=payload.username.strip(),
+            username=payload.username,
             username_normalized=username_normalized,
-            email=payload.email.strip() if payload.email else None,
+            email=payload.email,
             email_normalized=email_normalized,
             password_hash=hash_password(payload.password),
             role=UserRole.USER.value,
@@ -53,6 +53,8 @@ class AuthService:
         )
         self.db.add(user)
         try:
+            self.db.flush()
+            self._add_identities(user.id, username_normalized, email_normalized)
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
@@ -66,9 +68,9 @@ class AuthService:
             raise ConflictException("bootstrap 用户记录不存在，请先执行迁移")
         if user.is_active or user.password_hash != "!":
             raise ConflictException("bootstrap admin 已初始化，拒绝重复执行")
-        user.username = payload.username.strip()
+        user.username = payload.username
         user.username_normalized = normalize_identity(payload.username)
-        user.email = payload.email.strip() if payload.email else None
+        user.email = payload.email
         user.email_normalized = (
             normalize_identity(payload.email) if payload.email else None
         )
@@ -80,6 +82,13 @@ class AuthService:
         user.is_active = True
         user.must_change_password = False
         try:
+            self.db.execute(
+                delete(UserIdentity).where(UserIdentity.user_id == user.id)
+            )
+            self.db.flush()
+            self._add_identities(
+                user.id, user.username_normalized, user.email_normalized
+            )
             self.db.commit()
         except IntegrityError as exc:
             self.db.rollback()
@@ -92,12 +101,9 @@ class AuthService:
             raise RuntimeError("登录服务缺少应用 Settings")
         normalized = normalize_identity(payload.identity)
         user = self.db.scalar(
-            select(User).where(
-                or_(
-                    User.username_normalized == normalized,
-                    User.email_normalized == normalized,
-                )
-            )
+            select(User)
+            .join(UserIdentity, UserIdentity.user_id == User.id)
+            .where(UserIdentity.normalized_value == normalized)
         )
         password_hash = (
             user.password_hash
@@ -124,3 +130,19 @@ class AuthService:
             raise ValidationException("用户名规范化后长度无效")
         if email is not None and len(email) > 640:
             raise ValidationException("邮箱规范化后长度无效")
+
+    def _add_identities(
+        self,
+        user_id: str,
+        username: str,
+        email: str | None,
+    ) -> None:
+        values = {username}
+        if email:
+            values.add(email)
+        self.db.add_all(
+            [
+                UserIdentity(normalized_value=value, user_id=user_id)
+                for value in sorted(values)
+            ]
+        )

@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentUser
@@ -11,7 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.exceptions import ConflictException, ResourceNotFoundException
 from app.core.response import ApiResponse, success_response
 from app.database.sqlite import get_db
-from app.schemas.file import FileRecordResponse, FileUploadResponse
+from app.schemas.file import FileRecordPage, FileRecordResponse, FileUploadResponse
 from app.schemas.job import JobResponse
 from app.models import FileRecord, Job, JobType, KnowledgeBase, UserRole
 from app.repositories.job_repository import JobRepository
@@ -104,14 +104,61 @@ def list_files(
     settings: AppSettings,
     runtime: RagRuntime,
     user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    """List the real file records in one knowledge base."""
-    _owned_knowledge_base(db, str(knowledge_base_id), user)
-    records = FileService(db, settings, runtime).list_files(
-        str(knowledge_base_id)
+    """Deprecated array response retained for one release."""
+    knowledge_base = _owned_knowledge_base(db, str(knowledge_base_id), user)
+    records, total = FileService(db, settings, runtime).list_files_page(
+        str(knowledge_base_id), limit=limit, offset=offset
     )
-    data = [_file_response(db, settings, item) for item in records]
-    return success_response(data)
+    data = [
+        FileRecordResponse.from_record(
+            record,
+            settings=settings,
+            knowledge_base=knowledge_base,
+            job=job,
+        )
+        for record, job in records
+    ]
+    response = success_response(data)
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "next-release"
+    response.headers["X-Total-Count"] = str(total)
+    return response
+
+
+@router.get("/page", response_model=ApiResponse[FileRecordPage])
+def list_files_page(
+    knowledge_base_id: UUID,
+    db: DatabaseSession,
+    settings: AppSettings,
+    runtime: RagRuntime,
+    user: CurrentUser,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    knowledge_base = _owned_knowledge_base(db, str(knowledge_base_id), user)
+    records, total = FileService(db, settings, runtime).list_files_page(
+        str(knowledge_base_id), limit=limit, offset=offset
+    )
+    items = [
+        FileRecordResponse.from_record(
+            record,
+            settings=settings,
+            knowledge_base=knowledge_base,
+            job=job,
+        )
+        for record, job in records
+    ]
+    return success_response(
+        FileRecordPage(
+            items=items,
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+    )
 
 
 @router.get("/{file_id}", response_model=ApiResponse[FileRecordResponse])

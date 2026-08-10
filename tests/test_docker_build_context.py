@@ -65,7 +65,7 @@ def test_frontend_context_and_dockerfile_exclude_host_and_test_inputs() -> None:
         "!public/**",
         "!scripts/build-real.mjs",
         "!scripts/audit-real-build.mjs",
-        "!nginx.conf",
+        "!nginx.conf.template",
     } <= set(patterns)
     assert not any(
         pattern.startswith(

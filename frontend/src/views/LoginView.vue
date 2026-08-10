@@ -10,12 +10,14 @@ import { safeInternalRedirect } from '@/router'
 import { useAuthStore } from '@/stores/auth'
 import { AppError } from '@/types'
 import { getErrorMessage } from '@/utils/error'
+import { validatePasswordPolicy } from '@/utils/passwordPolicy'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 
 type KnowledgeGroup = 'core' | 'identity' | 'security'
+type AuthMode = 'login' | 'register'
 
 interface KnowledgeStarMapHandle {
   setFocus: (group: KnowledgeGroup, active: boolean) => void
@@ -25,15 +27,21 @@ interface KnowledgeStarMapHandle {
 
 const pageRef = ref<HTMLElement | null>(null)
 const cardRef = ref<HTMLElement | null>(null)
+const identityInputRef = ref<HTMLInputElement | null>(null)
 const passwordInputRef = ref<HTMLInputElement | null>(null)
 const statusRef = ref<HTMLParagraphElement | null>(null)
 const starMapRef = ref<KnowledgeStarMapHandle | null>(null)
 
+const authMode = ref<AuthMode>('login')
 const identity = ref('')
+const email = ref('')
 const password = ref('')
+const passwordConfirmation = ref('')
 const showPassword = ref(false)
 const identityError = ref('')
+const emailError = ref('')
 const passwordError = ref('')
+const passwordConfirmationError = ref('')
 const formMessage = ref('')
 const formMessageKind = ref<'error' | 'info'>('error')
 const retryAfterSeconds = ref(0)
@@ -46,6 +54,10 @@ const passwordType = computed(() => (showPassword.value ? 'text' : 'password'))
 const passwordToggleLabel = computed(() =>
   showPassword.value ? '隐藏密码' : '显示密码',
 )
+const isRegisterMode = computed(() => authMode.value === 'register')
+const formTitle = computed(() => (isRegisterMode.value ? '创建账户' : '欢迎回来'))
+const formKicker = computed(() => (isRegisterMode.value ? '账户注册' : '账户登录'))
+const submitLabel = computed(() => (isRegisterMode.value ? '注册并登录' : '登录'))
 
 let introMedia: ReturnType<typeof gsap.matchMedia> | null = null
 let retryInterval = 0
@@ -59,7 +71,7 @@ function updateRetryMessage(): void {
   window.clearInterval(retryInterval)
   retryInterval = 0
   formMessageKind.value = 'info'
-  formMessage.value = '现在可以重新尝试登录。'
+  formMessage.value = `现在可以重新尝试${isRegisterMode.value ? '注册' : '登录'}。`
 }
 
 function startRetryCountdown(seconds: number | null | undefined): void {
@@ -72,31 +84,40 @@ function startRetryCountdown(seconds: number | null | undefined): void {
   }, 1000)
 }
 
-function passwordByteLength(value: string): number {
-  return new TextEncoder().encode(value).length
-}
-
 function validateForm(): boolean {
   identityError.value = ''
+  emailError.value = ''
   passwordError.value = ''
+  passwordConfirmationError.value = ''
 
   const normalizedIdentity = identity.value.trim()
   if (!normalizedIdentity) {
-    identityError.value = '请输入用户名或邮箱。'
-  } else if (normalizedIdentity.length > 320) {
-    identityError.value = '用户名或邮箱不能超过 320 个字符。'
+    identityError.value = isRegisterMode.value
+      ? '请输入用户名。'
+      : '请输入用户名或邮箱。'
+  } else if (normalizedIdentity.length > (isRegisterMode.value ? 100 : 320)) {
+    identityError.value = isRegisterMode.value
+      ? '用户名不能超过 100 个字符。'
+      : '用户名或邮箱不能超过 320 个字符。'
   }
 
-  const bytes = passwordByteLength(password.value)
-  if (!password.value) {
-    passwordError.value = '请输入密码。'
-  } else if (bytes < 12) {
-    passwordError.value = '密码至少需要 12 个 UTF-8 字节。'
-  } else if (bytes > 72) {
-    passwordError.value = '密码不能超过 72 个 UTF-8 字节。'
+  const normalizedEmail = email.value.trim()
+  if (isRegisterMode.value && normalizedEmail.length > 320) {
+    emailError.value = '邮箱不能超过 320 个字符。'
   }
 
-  return !identityError.value && !passwordError.value
+  passwordError.value = validatePasswordPolicy(password.value) ?? ''
+
+  if (isRegisterMode.value && passwordConfirmation.value !== password.value) {
+    passwordConfirmationError.value = '两次输入的密码不一致。'
+  }
+
+  return (
+    !identityError.value &&
+    !emailError.value &&
+    !passwordError.value &&
+    !passwordConfirmationError.value
+  )
 }
 
 function clearIdentityError(): void {
@@ -108,9 +129,41 @@ function clearIdentityError(): void {
 
 function clearPasswordError(): void {
   passwordError.value = ''
+  passwordConfirmationError.value = ''
   if (formMessageKind.value === 'error' && retryAfterSeconds.value === 0) {
     formMessage.value = ''
   }
+}
+
+function clearEmailError(): void {
+  emailError.value = ''
+  if (formMessageKind.value === 'error' && retryAfterSeconds.value === 0) {
+    formMessage.value = ''
+  }
+}
+
+function clearPasswordConfirmationError(): void {
+  passwordConfirmationError.value = ''
+  if (formMessageKind.value === 'error' && retryAfterSeconds.value === 0) {
+    formMessage.value = ''
+  }
+}
+
+function switchAuthMode(mode: AuthMode): void {
+  if (isSubmitting.value || authMode.value === mode) return
+  authMode.value = mode
+  email.value = ''
+  password.value = ''
+  passwordConfirmation.value = ''
+  identityError.value = ''
+  emailError.value = ''
+  passwordError.value = ''
+  passwordConfirmationError.value = ''
+  formMessage.value = ''
+  retryAfterSeconds.value = 0
+  window.clearInterval(retryInterval)
+  retryInterval = 0
+  void nextTick(() => identityInputRef.value?.focus({ preventScroll: true }))
 }
 
 function setKnowledgeFocus(group: KnowledgeGroup, active: boolean): void {
@@ -122,11 +175,20 @@ function togglePassword(): void {
   void nextTick(() => passwordInputRef.value?.focus({ preventScroll: true }))
 }
 
-function loginErrorMessage(error: unknown): string {
+function authErrorMessage(error: unknown): string {
   if (error instanceof AppError) {
     if (error.status === 401) return '用户名、邮箱或密码不正确。'
-    if (error.status === 403) return '当前账户无法登录，请联系系统管理员。'
-    if (error.status === 422) return '账号或密码格式不符合认证服务要求。'
+    if (error.status === 403) {
+      return isRegisterMode.value
+        ? '服务端当前未开放注册，请将 ALLOW_REGISTRATION 设置为 true 后重启服务。'
+        : '当前账户无法登录，请联系系统管理员。'
+    }
+    if (error.status === 409) return '用户名或邮箱已存在，请更换后重试。'
+    if (error.status === 422) {
+      return isRegisterMode.value
+        ? '注册资料格式不符合服务端要求。'
+        : '账号或密码格式不符合认证服务要求。'
+    }
     if (error.status === 429) {
       return `尝试次数过多，请在 ${Math.max(1, error.retryAfterSeconds ?? 1)} 秒后重试。`
     }
@@ -175,7 +237,11 @@ async function handleSubmit(): Promise<void> {
   }
 
   try {
-    await authStore.login(identity.value, password.value)
+    if (isRegisterMode.value) {
+      await authStore.register(identity.value, email.value, password.value)
+    } else {
+      await authStore.login(identity.value, password.value)
+    }
     const destination = safeInternalRedirect(route.query.redirect)
     await router.replace(destination)
   } catch (error) {
@@ -183,7 +249,7 @@ async function handleSubmit(): Promise<void> {
     if (error instanceof AppError && error.status === 429) {
       startRetryCountdown(error.retryAfterSeconds)
     } else {
-      formMessage.value = loginErrorMessage(error)
+      formMessage.value = authErrorMessage(error)
     }
     starMapRef.value?.restore()
     if (cardRef.value) {
@@ -236,14 +302,18 @@ onBeforeUnmount(() => {
 
 <template>
   <main ref="pageRef" class="login-page" :data-api-mode="apiConfig.mode">
-    <a class="login-skip-link" href="#nexus-login-form">跳到登录表单</a>
+    <a class="login-skip-link" href="#nexus-login-form">跳到账户表单</a>
     <div class="login-grain" aria-hidden="true"></div>
     <div class="login-vignette" aria-hidden="true"></div>
     <KnowledgeStarMap ref="starMapRef" />
 
     <div class="login-auth-layout">
       <section class="login-auth-panel" aria-labelledby="login-title">
-        <div ref="cardRef" class="login-card">
+        <div
+          ref="cardRef"
+          class="login-card"
+          :class="{ 'is-register': isRegisterMode }"
+        >
           <div class="login-product-mark" data-login-intro>
             <span class="login-product-symbol" aria-hidden="true">
               <i></i>
@@ -259,26 +329,29 @@ onBeforeUnmount(() => {
 
           <div class="login-card-heading" data-login-intro>
             <div class="login-kicker-row">
-              <p>账户登录</p>
+              <p>{{ formKicker }}</p>
               <span v-if="loginModePresentation.badge" class="login-mode-badge">
                 {{ loginModePresentation.badge }}
               </span>
             </div>
-            <h1 id="login-title">欢迎回来</h1>
+            <h1 id="login-title">{{ formTitle }}</h1>
           </div>
 
           <form id="nexus-login-form" novalidate @submit.prevent="handleSubmit">
             <div class="login-field-group" data-login-intro>
-              <label for="login-identity">用户名或邮箱</label>
+              <label for="login-identity">
+                {{ isRegisterMode ? '用户名' : '用户名或邮箱' }}
+              </label>
               <input
                 id="login-identity"
+                ref="identityInputRef"
                 v-model="identity"
                 name="identity"
                 type="text"
-                inputmode="email"
+                :inputmode="isRegisterMode ? 'text' : 'email'"
                 autocomplete="username"
-                placeholder="name@example.com"
-                maxlength="320"
+                :placeholder="isRegisterMode ? '设置登录用户名' : 'name@example.com'"
+                :maxlength="isRegisterMode ? 100 : 320"
                 :aria-invalid="Boolean(identityError)"
                 :aria-describedby="identityError ? 'login-identity-error' : undefined"
                 @input="clearIdentityError"
@@ -294,6 +367,28 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
+            <div v-if="isRegisterMode" class="login-field-group" data-login-intro>
+              <label for="register-email">邮箱（可选）</label>
+              <input
+                id="register-email"
+                v-model="email"
+                name="email"
+                type="email"
+                inputmode="email"
+                autocomplete="email"
+                placeholder="name@example.com"
+                maxlength="320"
+                :aria-invalid="Boolean(emailError)"
+                :aria-describedby="emailError ? 'register-email-error' : undefined"
+                @input="clearEmailError"
+                @focus="setKnowledgeFocus('identity', true)"
+                @blur="setKnowledgeFocus('identity', false)"
+              />
+              <p v-if="emailError" id="register-email-error" class="login-field-error">
+                {{ emailError }}
+              </p>
+            </div>
+
             <div class="login-field-group" data-login-intro>
               <label for="login-password">密码</label>
               <div class="login-password-field">
@@ -303,8 +398,8 @@ onBeforeUnmount(() => {
                   v-model="password"
                   name="password"
                   :type="passwordType"
-                  autocomplete="current-password"
-                  placeholder="12–72 个 UTF-8 字节"
+                  :autocomplete="isRegisterMode ? 'new-password' : 'current-password'"
+                  placeholder="至少 8 个字符，最多 72 个 UTF-8 字节"
                   :aria-invalid="Boolean(passwordError)"
                   :aria-describedby="passwordError ? 'login-password-error' : undefined"
                   @input="clearPasswordError"
@@ -331,9 +426,39 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
+            <div v-if="isRegisterMode" class="login-field-group" data-login-intro>
+              <label for="register-password-confirmation">确认密码</label>
+              <div class="login-password-field">
+                <input
+                  id="register-password-confirmation"
+                  v-model="passwordConfirmation"
+                  name="password-confirmation"
+                  :type="passwordType"
+                  autocomplete="new-password"
+                  placeholder="再次输入密码"
+                  :aria-invalid="Boolean(passwordConfirmationError)"
+                  :aria-describedby="
+                    passwordConfirmationError
+                      ? 'register-password-confirmation-error'
+                      : undefined
+                  "
+                  @input="clearPasswordConfirmationError"
+                  @focus="setKnowledgeFocus('security', true)"
+                  @blur="setKnowledgeFocus('security', false)"
+                />
+              </div>
+              <p
+                v-if="passwordConfirmationError"
+                id="register-password-confirmation-error"
+                class="login-field-error"
+              >
+                {{ passwordConfirmationError }}
+              </p>
+            </div>
+
             <div class="login-session-meta" data-login-intro>
               <span class="login-session-mark" aria-hidden="true"></span>
-              <span>安全会话</span>
+              <span>{{ isRegisterMode ? '创建后自动登录' : '安全会话' }}</span>
               <span class="login-session-separator">/</span>
               <span>关闭标签页后退出</span>
             </div>
@@ -352,7 +477,7 @@ onBeforeUnmount(() => {
                     ? '验证中…'
                     : retryAfterSeconds > 0
                       ? `${retryAfterSeconds} 秒后重试`
-                      : '登录'
+                      : submitLabel
                 }}
               </span>
               <span class="login-submit-arrow" aria-hidden="true">↗</span>
@@ -379,7 +504,18 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="login-card-footer" data-login-intro>
-            <template v-if="loginModePresentation.workspaceLinkLabel">
+            <template v-if="!loginModePresentation.isMock">
+              <span>{{ isRegisterMode ? '已有账户？' : '还没有账户？' }}</span>
+              <button
+                class="login-footer-action"
+                type="button"
+                :disabled="isSubmitting"
+                @click="switchAuthMode(isRegisterMode ? 'login' : 'register')"
+              >
+                {{ isRegisterMode ? '返回登录' : '注册账户' }}
+              </button>
+            </template>
+            <template v-else-if="loginModePresentation.workspaceLinkLabel">
               <span>{{ loginModePresentation.footerLabel }}</span>
               <RouterLink to="/dashboard">
                 {{ loginModePresentation.workspaceLinkLabel }}
@@ -481,6 +617,27 @@ onBeforeUnmount(() => {
   height: 2.6rem;
   pointer-events: none;
   content: '';
+}
+
+.login-card.is-register {
+  padding-block: clamp(1.5rem, 3vw, 2.15rem);
+}
+
+.login-card.is-register .login-product-mark {
+  margin-bottom: 1.8rem;
+}
+
+.login-card.is-register .login-field-group {
+  margin-top: 1.15rem;
+}
+
+.login-card.is-register .login-session-meta {
+  margin-block: 0.95rem 1.2rem;
+}
+
+.login-card.is-register .login-security-boundary {
+  margin-top: 1rem;
+  padding-top: 1.2rem;
 }
 
 .login-card::before {
@@ -861,13 +1018,30 @@ onBeforeUnmount(() => {
 }
 
 .login-card-footer a,
-.login-card-footer strong {
+.login-card-footer strong,
+.login-footer-action {
   color: #d7d7d7;
   font-weight: 700;
 }
 
-.login-card-footer a {
+.login-card-footer a,
+.login-footer-action {
   border-bottom: 1px solid currentColor;
+}
+
+.login-footer-action {
+  padding: 0;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.login-footer-action:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .login-page button:focus-visible,

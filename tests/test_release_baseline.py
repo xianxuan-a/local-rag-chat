@@ -89,4 +89,6 @@ def test_readme_local_links_and_migration_head_are_release_tracked() -> None:
     tracked = set(result.stdout.splitlines())
     assert readme_link_errors(PROJECT_ROOT, tracked) == []
     assert "alembic/versions/0007_retrieval_modes.py" in tracked
-    assert head_revision() == "0007_retrieval_modes"
+    assert "alembic/versions/0008_user_identities.py" in tracked
+    assert "alembic/versions/0009_user_admin_audit.py" in tracked
+    assert head_revision() == "0009_user_admin_audit"

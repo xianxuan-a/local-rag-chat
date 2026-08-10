@@ -1,11 +1,39 @@
 import type { AppApi } from '@/api/contracts'
 import * as mockService from '@/mocks/services/mockService'
 import { AppError } from '@/types'
-import type { DurableJob, EvaluationDataset, EvaluationRun, IndexState } from '@/types'
+import type {
+  AuthenticatedUser,
+  DurableJob,
+  EvaluationDataset,
+  EvaluationRun,
+  IndexState,
+  UserAdminAuditEvent,
+} from '@/types'
 
 const mockJobs = new Map<string, DurableJob>()
 const mockDatasets: EvaluationDataset[] = []
 const mockRuns: EvaluationRun[] = []
+const mockUsers: AuthenticatedUser[] = [
+  {
+    id: 'mock-admin',
+    username: 'mock-admin',
+    email: 'mock-admin@example.com',
+    role: 'ADMIN',
+    isActive: true,
+    mustChangePassword: false,
+    createdAt: '2026-07-01T08:00:00+00:00',
+  },
+  {
+    id: 'mock-user',
+    username: 'knowledge-user',
+    email: 'knowledge-user@example.com',
+    role: 'USER',
+    isActive: true,
+    mustChangePassword: false,
+    createdAt: '2026-07-02T08:00:00+00:00',
+  },
+]
+const mockUserAuditEvents: UserAdminAuditEvent[] = []
 
 function mockId(prefix: string): string {
   return `${prefix}-${globalThis.crypto.randomUUID()}`
@@ -36,6 +64,65 @@ function createMockJob(
 }
 
 export const mockAdapter: AppApi = {
+  listUsers(options = {}) {
+    const query = options.query?.trim().toLocaleLowerCase() ?? ''
+    const filtered = mockUsers.filter(
+      (user) =>
+        (!query ||
+          user.username.toLocaleLowerCase().includes(query) ||
+          user.email?.toLocaleLowerCase().includes(query)) &&
+        (!options.role || user.role === options.role) &&
+        (options.isActive === undefined || user.isActive === options.isActive),
+    )
+    const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
+    return Promise.resolve({
+      items: structuredClone(filtered.slice(offset, offset + limit)),
+      total: filtered.length,
+      limit,
+      offset,
+    })
+  },
+  updateUser(id, input) {
+    const user = mockUsers.find((candidate) => candidate.id === id)
+    if (!user) throw new AppError('USER_NOT_FOUND', '用户不存在。')
+    const beforeState = { role: user.role, isActive: user.isActive }
+    if (input.role !== undefined) user.role = input.role
+    if (input.isActive !== undefined) user.isActive = input.isActive
+    const afterState = { role: user.role, isActive: user.isActive }
+    if (
+      beforeState.role !== afterState.role ||
+      beforeState.isActive !== afterState.isActive
+    ) {
+      mockUserAuditEvents.unshift({
+        id: mockId('audit'),
+        actorUserId: 'mock-admin',
+        targetUserId: user.id,
+        action: 'USER_UPDATED',
+        beforeState,
+        afterState,
+        reason: input.reason?.trim() || null,
+        requestId: globalThis.crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+      })
+    }
+    return Promise.resolve(structuredClone(user))
+  },
+  listUserAuditEvents(options = {}) {
+    const filtered = options.targetUserId
+      ? mockUserAuditEvents.filter(
+          (event) => event.targetUserId === options.targetUserId,
+        )
+      : mockUserAuditEvents
+    const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
+    return Promise.resolve({
+      items: structuredClone(filtered.slice(offset, offset + limit)),
+      total: filtered.length,
+      limit,
+      offset,
+    })
+  },
   getSettings: mockService.getSettings,
   updateSettings: mockService.updateSettings,
   getDashboard: mockService.getDashboard,
@@ -45,6 +132,20 @@ export const mockAdapter: AppApi = {
   updateKnowledgeBase: mockService.updateKnowledgeBase,
   deleteKnowledgeBase: mockService.deleteKnowledgeBase,
   listFiles: mockService.listFiles,
+  async listFilesPage(knowledgeBaseId, options = {}) {
+    const files = await mockService.listFiles(
+      knowledgeBaseId,
+      options.signal === undefined ? {} : { signal: options.signal },
+    )
+    const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
+    return {
+      items: files.slice(offset, offset + limit),
+      total: files.length,
+      limit,
+      offset,
+    }
+  },
   getFile: mockService.getFile,
   addFile: mockService.addFile,
   processFile: mockService.processFile,

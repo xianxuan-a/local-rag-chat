@@ -15,6 +15,7 @@ import type {
   EvaluationRunInput,
   EvaluationSummary,
   FileRecord,
+  FileRecordPage,
   FileUploadInput,
   IndexState,
   DurableJob,
@@ -23,6 +24,10 @@ import type {
   RetrievalRequest,
   RetrievalResponse,
   RebuildSnapshot,
+  AdminUserPage,
+  AdminUserUpdate,
+  UserAdminAuditEventPage,
+  AuthenticatedUser,
 } from '@/types'
 
 export interface ChatStreamHandlers {
@@ -48,6 +53,22 @@ export interface RequestOptions {
 }
 
 export interface AppApi {
+  listUsers(options?: {
+    query?: string
+    role?: 'ADMIN' | 'USER'
+    isActive?: boolean
+    limit?: number
+    offset?: number
+    signal?: AbortSignal
+  }): Promise<AdminUserPage>
+  updateUser(id: string, input: AdminUserUpdate): Promise<AuthenticatedUser>
+  listUserAuditEvents(options?: {
+    targetUserId?: string
+    limit?: number
+    offset?: number
+    signal?: AbortSignal
+  }): Promise<UserAdminAuditEventPage>
+
   getSettings(options?: RequestOptions): Promise<AppSettings>
   updateSettings(input: AppSettingsInput): Promise<AppSettings>
 
@@ -65,6 +86,10 @@ export interface AppApi {
   deleteKnowledgeBase(id: string): Promise<void>
 
   listFiles(knowledgeBaseId: string, options?: RequestOptions): Promise<FileRecord[]>
+  listFilesPage(
+    knowledgeBaseId: string,
+    options?: { limit?: number; offset?: number; signal?: AbortSignal },
+  ): Promise<FileRecordPage>
   getFile(id: string): Promise<FileRecord>
   addFile(knowledgeBaseId: string, input: FileUploadInput): Promise<FileRecord>
   processFile(id: string, handlers: ProgressHandlers): Promise<FileRecord>

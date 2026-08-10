@@ -48,3 +48,10 @@ class JobResponse(BaseModel):
     updated_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class JobPage(BaseModel):
+    items: list[JobResponse]
+    total: int
+    limit: int
+    offset: int

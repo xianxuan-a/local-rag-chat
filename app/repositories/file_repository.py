@@ -7,10 +7,11 @@ from datetime import datetime
 from app.models import (
     FileRecord,
     FileStatus,
+    Job,
     KnowledgeBase,
     RebuildStatus,
 )
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 
@@ -55,6 +56,32 @@ class FileRepository:
             .order_by(FileRecord.created_at.asc(), FileRecord.id.asc())
         )
         return list(self.db.scalars(statement).all())
+
+    def list_page_with_processing_jobs(
+        self,
+        knowledge_base_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[tuple[FileRecord, Job | None]], int]:
+        condition = FileRecord.knowledge_base_id == str(knowledge_base_id)
+        statement = (
+            select(FileRecord, Job)
+            .outerjoin(Job, Job.id == FileRecord.processing_job_id)
+            .where(condition)
+            .order_by(FileRecord.created_at.asc(), FileRecord.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        items = [
+            (record, job)
+            for record, job in self.db.execute(statement).all()
+        ]
+        total = int(
+            self.db.scalar(select(func.count(FileRecord.id)).where(condition))
+            or 0
+        )
+        return items, total
 
     def update_status(
         self,

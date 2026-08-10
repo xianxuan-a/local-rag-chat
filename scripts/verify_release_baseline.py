@@ -37,7 +37,7 @@ REQUIRED_PATHS = frozenset(
         "frontend/.gitignore",
         "frontend/Dockerfile",
         "frontend/README.md",
-        "frontend/nginx.conf",
+        "frontend/nginx.conf.template",
         "frontend/package-lock.json",
         "frontend/package.json",
         "frontend/playwright.config.ts",

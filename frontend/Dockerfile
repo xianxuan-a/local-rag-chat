@@ -28,7 +28,7 @@ ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/xianxuan-a/local-rag-chat" \
       org.opencontainers.image.revision="${VCS_REF}"
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist-real/ /usr/share/nginx/html/
 
 EXPOSE 8080
